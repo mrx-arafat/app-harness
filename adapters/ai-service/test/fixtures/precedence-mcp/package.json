@@ -1,0 +1,11 @@
+{
+  "name": "precedence-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "express": "^4.19.2",
+    "openai": "^4.47.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "bullmq": "^5.0.0"
+  }
+}

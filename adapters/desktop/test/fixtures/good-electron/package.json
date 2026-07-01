@@ -1,0 +1,9 @@
+{
+  "name": "good-electron",
+  "version": "1.0.0",
+  "description": "Tiny safe Electron fixture",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "^30.0.0"
+  }
+}

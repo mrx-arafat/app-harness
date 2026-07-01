@@ -1,0 +1,9 @@
+{
+  "id": "extension",
+  "displayName": "Browser/Web extension",
+  "verifyKind": "extension",
+  "detectSignals": ["manifest.json:manifest_version", "src/manifest.json:manifest_version", "public/manifest.json:manifest_version"],
+  "rubricProfile": "ui",
+  "gateChecks": ["install", "build", "lint", "test", "manifest"],
+  "surfacesKind": "surface"
+}

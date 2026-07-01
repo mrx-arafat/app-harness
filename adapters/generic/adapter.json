@@ -1,0 +1,9 @@
+{
+  "id": "generic",
+  "displayName": "Generic (config-driven)",
+  "verifyKind": "config",
+  "detectSignals": ["fallback — no first-class adapter matched (Planner-authored .config)"],
+  "rubricProfile": "generic",
+  "gateChecks": ["install", "build", "lint", "test"],
+  "surfacesKind": "invocation"
+}

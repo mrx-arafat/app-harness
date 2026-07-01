@@ -1,0 +1,9 @@
+{
+  "id": "cli",
+  "displayName": "CLI / TUI tool",
+  "verifyKind": "cli",
+  "detectSignals": ["package.json:bin", "Cargo.toml:[[bin]]", "go.mod:package main", "pyproject.toml:console_scripts", "__main__.py", "argparse|click|typer"],
+  "rubricProfile": "cli",
+  "gateChecks": ["install", "build", "lint", "test"],
+  "surfacesKind": "invocation"
+}

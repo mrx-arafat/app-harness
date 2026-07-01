@@ -1,0 +1,9 @@
+{
+  "name": "broken-electron",
+  "version": "1.0.0",
+  "description": "Tiny insecure Electron fixture (planted smells + build error)",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "^30.0.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "agent-no-key",
+  "version": "1.0.0",
+  "private": true,
+  "main": "agent.js",
+  "dependencies": {
+    "openai": "^4.47.1"
+  }
+}

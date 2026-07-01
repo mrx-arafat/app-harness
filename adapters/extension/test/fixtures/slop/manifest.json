@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Slop Fixture Extension",
+  "version": "1.0.0",
+  "action": { "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js" },
+  "host_permissions": ["<all_urls>"],
+  "permissions": ["storage", "tabs"]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "mobile",
+  "displayName": "Mobile app (RN/Expo/Flutter/iOS)",
+  "verifyKind": "simulator",
+  "detectSignals": ["app.json:expo", "package.json:react-native", "pubspec.yaml:flutter", "*.xcodeproj", "*.xcworkspace", "Package.swift"],
+  "rubricProfile": "ui",
+  "gateChecks": ["install", "analyze", "lint", "test", "build"],
+  "surfacesKind": "screen"
+}

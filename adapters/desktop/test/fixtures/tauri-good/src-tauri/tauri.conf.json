@@ -1,0 +1,7 @@
+{
+  "build": { "distDir": "../dist", "devPath": "http://localhost:1420" },
+  "tauri": {
+    "security": { "csp": "default-src 'self'; script-src 'self'" },
+    "allowlist": { "all": false, "shell": { "all": false, "open": false } }
+  }
+}

@@ -1,0 +1,27 @@
+# Harness runtime artifacts (regenerated each run — never commit)
+.harness/
+.playwright-cli/
+
+# Stray binary/screenshot artifacts
+home
+*.png
+!scripts/test/fixtures/**/*.png
+
+# Built apps / deps produced by the harness or test fixtures
+app/
+node_modules/
+dist/
+build/
+target/
+.venv/
+__pycache__/
+.DS_Store
+
+# Exceptions: hand-authored fixture files that happen to live under an
+# otherwise-ignored dir name (these are checked-in test inputs, not build output).
+# A directory excluded by a bare "dist/" pattern above must ALSO be un-ignored
+# itself (not just its contents) before "!" negation on files inside it applies.
+!adapters/desktop/test/fixtures/tauri-good/dist/
+!adapters/desktop/test/fixtures/tauri-good/dist/**
+!adapters/desktop/test/fixtures/tauri-insecure/dist/
+!adapters/desktop/test/fixtures/tauri-insecure/dist/**

@@ -1,0 +1,13 @@
+{
+  "id": "ai-service",
+  "displayName": "AI / API / agent / automation service",
+  "verifyKind": "service",
+  "detectSignals": [
+    "package.json:express|fastify|hono|koa|@modelcontextprotocol/sdk|openai|@anthropic-ai/sdk|langchain|llamaindex",
+    "requirements.txt:fastapi|flask|mcp|openai|anthropic|langchain",
+    "pyproject.toml:fastapi|flask|mcp|openai|anthropic|langchain"
+  ],
+  "rubricProfile": "ai",
+  "gateChecks": ["install", "typecheck", "lint", "test", "boot"],
+  "surfacesKind": "endpoint"
+}

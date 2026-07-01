@@ -1,0 +1,8 @@
+{
+  "name": "broken-cli",
+  "version": "1.0.0",
+  "private": true,
+  "bin": {
+    "broken-cli": "bin/cli.js"
+  }
+}

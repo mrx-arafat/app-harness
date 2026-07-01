@@ -1,0 +1,9 @@
+{
+  "id": "web",
+  "displayName": "Web app (browser)",
+  "verifyKind": "browser",
+  "detectSignals": ["package.json:next|vite|react|astro|remix|svelte", "index.html"],
+  "rubricProfile": "ui",
+  "gateChecks": ["install", "typecheck", "lint", "test", "boot"],
+  "surfacesKind": "route"
+}

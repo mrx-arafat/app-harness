@@ -1,0 +1,8 @@
+[package]
+name = "goodrust"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "goodrust"
+path = "src/main.rs"

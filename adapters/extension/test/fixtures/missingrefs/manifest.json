@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "Missing Refs Fixture",
+  "version": "1.0.0",
+  "action": { "default_popup": "popup/does-not-exist.html" },
+  "background": { "service_worker": "bg-missing.js" }
+}

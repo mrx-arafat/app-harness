@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "good-expo",
+    "slug": "good-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0B1220"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0B1220"
+      }
+    }
+  }
+}

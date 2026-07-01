@@ -1,0 +1,9 @@
+{
+  "id": "desktop",
+  "displayName": "Desktop app (Electron/Tauri)",
+  "verifyKind": "desktop",
+  "detectSignals": ["electron in deps", "main entry is electron", "@tauri-apps/* deps", "src-tauri/tauri.conf.json"],
+  "rubricProfile": "ui",
+  "gateChecks": ["install", "typecheck", "lint", "test", "build"],
+  "surfacesKind": "window"
+}

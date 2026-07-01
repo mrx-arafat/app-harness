@@ -1,0 +1,7 @@
+{
+  "name": "missing-preload-electron",
+  "version": "1.0.0",
+  "description": "Electron fixture: webPreferences with no preload and no CSP (security smells, but compiles)",
+  "main": "main.js",
+  "devDependencies": { "electron": "^30.0.0" }
+}

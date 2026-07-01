@@ -1,0 +1,7 @@
+{
+  "build": { "distDir": "../dist" },
+  "tauri": {
+    "security": { "csp": null },
+    "allowlist": { "all": true, "shell": { "all": true } }
+  }
+}
