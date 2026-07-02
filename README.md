@@ -5,7 +5,7 @@
 A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X" into a supervised, self-correcting loop: **Plan → Generate → Gate → Evaluate**. No sprint decomposition, no context rot, no self-graded homework — every agent runs in isolation and coordinates only through files on disk.
 
 [![Repo](https://img.shields.io/badge/github-mrx--arafat%2Fapp--harness-181717?logo=github)](https://github.com/mrx-arafat/app-harness)
-[![Tests](https://img.shields.io/badge/tests-271%2F271_passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-272%2F272_passing-brightgreen)](#testing)
 [![Adapters](https://img.shields.io/badge/adapters-7_shipped-blue)](#adapters)
 
 ---
@@ -56,7 +56,7 @@ Human ──prompt──> Planner ──spec.md + holdout.md──> Generator �
 | **Planner** | human brief | `spec.md`, `.harness/holdout.md`, `.harness/adapter.json`, `.harness/state.md` | once |
 | **Generator** | `spec.md`, `findings.md` (NEVER `.harness/`) | `app/` + git | once, then on each fix or forced pivot |
 | **Gate** | live `app/` | `.harness/gate.md` | after each generate/fix, up to 2 repair attempts |
-| **Evaluator** | live artifact, `spec.md`, `.harness/holdout.md` | `findings.md` | two passes per loop iteration — A: correctness, B: adversarial quality |
+| **Evaluator** | live artifact, `spec.md`, `.harness/holdout.md` | structured verdict — the workflow merges both passes' findings into `findings.md` | two passes per loop iteration, run in parallel — A: correctness, B: adversarial quality |
 
 Nothing here resets context or breaks the job into human-authored sprints. `spec.md` and the gate's pass/fail result are the *only* contract between phases — everything an agent needs to pick up the thread lives on disk, not in a chat transcript.
 
@@ -119,8 +119,8 @@ bash scripts/test/run-tests.sh
 You should see a TAP-style report ending in something like:
 
 ```
-1..271
-# 271 tests, 271 passed, 0 failed
+1..272
+# 272 tests, 272 passed, 0 failed
 ```
 
 This is a hermetic self-test — no network calls, no real package installs, no live browser required for the default fast suite. If it's green, every adapter's `detect.sh` / `gate.sh` / `run.sh` / `verify.sh` / `quality.mjs` is working correctly against its own fixtures, and the dispatcher's adapter-resolution logic is verified.
@@ -163,6 +163,7 @@ Workflow({
 | `minBudget` | `60000` | Stop early and set `needsHuman=true` if remaining token budget drops below this |
 | `maxPivots` | `1` | Max forced discard-and-restart attempts when a build is flagged as generic slop |
 | `references` | *Linear, Stripe, Vercel, Notion...* | Design calibration string for the Evaluator — **UI adapters only** (`web`/`mobile`/`desktop`/`extension`); CLI/service builds are judged on ergonomics/robustness instead |
+| `serialEval` | `false` | Run evaluator Pass A then Pass B sequentially instead of in parallel. Set `true` for apps with shared **mutable server-side state** (a real DB) where two concurrent evaluators driving one server could contaminate each other's checks. Costs ~2× Evaluate wall-clock |
 
 The Workflow runs in the background; you'll get a completion notification. It returns:
 
@@ -190,8 +191,8 @@ Immediately after, Claude Code shows you the working artifact — screenshots fo
 1. **Plan** *(Opus, runs once)* — the Planner acts as a senior PM with full creative authority. It names the product, expands implied features, designs the UX or CLI surface, picks the adapter, and writes `spec.md` (the public contract) plus `.harness/holdout.md` — 5-10 adversarial checks the Generator will *never see*.
 2. **Generate** *(Sonnet)* — the Generator reads only `spec.md` and builds the complete artifact in one continuous pass, committing at milestones. It is explicitly forbidden from reading `.harness/` — doing so is reward-hacking and is detectable.
 3. **Gate** *(deterministic script, ~0 LLM tokens)* — a real script (`adapters/<id>/gate.sh`, invoked through the dispatcher) runs install/build/typecheck/lint/test/boot, whichever apply to the platform. `passed=true` only if nothing failed. Up to 2 cheap repair attempts before the loop gives up and flags for a human — expensive Evaluator calls are never spent on a build that doesn't even boot.
-4. **Evaluate** *(Opus, two passes per loop iteration)* — Pass A drives every acceptance criterion *and* every held-out check against the live artifact. Pass B hunts adversarially for quality issues (dead buttons, missing empty states, edge-case crashes, AI-slop aesthetics) using a pre-computed static scan. The harsher score per dimension wins. The loop repeats until `clean=true` and every rubric slot scores ≥ 2, or a brake fires.
-5. **Preview** *(deterministic)* — the final artifact is exercised one more time and every surface's screenshot or captured output is written to disk, ready to show the user with zero extra token spend.
+4. **Evaluate** *(Opus, two passes per loop iteration — run in **parallel**)* — Pass A drives every acceptance criterion *and* every held-out check against the live artifact; Pass B hunts adversarially for quality issues (dead buttons, missing empty states, edge-case crashes, AI-slop aesthetics) using a pre-computed static scan. Neither writes files — each returns its findings in its structured verdict and the workflow merges them into `findings.md` (no file race; `serialEval: true` opts back into sequential for stateful backends). For server-backed adapters (web) **one shared server instance powers the whole pass** — the deterministic probe and both evaluators reuse it through separate browser sessions instead of paying three boot/teardown cycles. Every failing item lands in a forensic format — `EXPECTED | ACTUAL | REPRO | FIX` — and the fix agent must re-run each finding's own repro live before returning. After every fix, the **machine gate re-runs** (near-zero LLM cost): a fix that broke the build gets one targeted repair, and if it still fails the loop stops with `needsHuman=true` rather than spending two Opus evaluators on a non-compiling build. The harsher score per dimension wins. The loop repeats until `clean=true` and every rubric slot scores ≥ 2, or a brake fires.
+5. **Preview** *(deterministic)* — when the source is byte-identical to the last verify scan, the preview is derived straight from the existing `probe.json` — zero re-boot; otherwise every surface is exercised once more and its screenshot or captured output written to disk. Set `HARNESS_PREVIEW_PROD=1` (or pass `--prod` to `harness.sh preview`) to capture against the **production build** — no dev-server hot-reload badge or overlays in the screenshots.
 
 ## The Rubric
 

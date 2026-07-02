@@ -48,12 +48,13 @@ _harness_dir() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_start() {
-  local appdir="" port_pref=0
+  local appdir="" port_pref=0 prod=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --port)   port_pref="$2"; shift 2 ;;
       --port=*) port_pref="${1#--port=}"; shift ;;
+      --prod)   prod=1; shift ;;
       -*)       shift ;;   # silently ignore unknown flags
       *)        appdir="$1"; shift ;;
     esac
@@ -87,6 +88,27 @@ cmd_start() {
   if [ -z "$run_script" ]; then
     echo "FAIL no runnable npm script (dev/start/serve/preview) found in $appdir/package.json"
     exit 1
+  fi
+
+  # --prod: serve the PRODUCTION build instead of the dev server (no hot-reload
+  # badge / dev overlays in screenshots). Requires a `build` script plus a prod
+  # serve script (`start` for next/node, `preview` for vite). Build failures fall
+  # back to the dev server rather than failing the boot — prod mode is cosmetic
+  # polish for previews, not a gate.
+  if [ "$prod" -eq 1 ]; then
+    local prod_serve=""
+    prod_serve="$(node -e 'try{const s=require(process.argv[1]+"/package.json").scripts||{};if(!s.build){process.exit(0)}process.stdout.write(s.start?"start":(s.preview?"preview":""))}catch(e){}' "$appdir" 2>/dev/null)"
+    if [ -n "$prod_serve" ]; then
+      printf '[run] prod mode: building (%s run build)…\n' "$pm" >&2
+      if ( cd "$appdir" && $(hp_pm_run "$pm" build) >>"$logfile" 2>&1 ); then
+        run_script="$prod_serve"
+        printf '[run] prod build ok — serving via "%s"\n' "$run_script" >&2
+      else
+        printf '[run] prod build FAILED — falling back to dev script "%s" (see server.log)\n' "$run_script" >&2
+      fi
+    else
+      printf '[run] prod requested but no build+start/preview scripts — using "%s"\n' "$run_script" >&2
+    fi
   fi
 
   printf '[run] pm=%s  fw=%s  script=%s\n' "$pm" "$fw" "$run_script" >&2

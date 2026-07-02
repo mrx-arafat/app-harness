@@ -126,6 +126,18 @@ function collectFiles(root, out) {
   }
 }
 
+// Content directories: lesson text, seed/sample data, docs, fixtures. Code that
+// appears there is usually QUOTED TEACHING/SAMPLE MATERIAL (a lesson string showing
+// `console.log(...)`, an example TODO), not the app's own logic — line-based rules
+// can't see string boundaries, so they'd flag it all. In these paths only `secret`
+// hits survive (a leaked key is a finding wherever it lives).
+const CONTENT_DIR_RE = /(^|\/)(data|content|docs|fixtures|examples|samples|lessons)(\/|$)/;
+
+/** True when a root-relative path sits under a content/sample-material directory. */
+export function isContentPath(rel) {
+  return CONTENT_DIR_RE.test(String(rel).replace(/\\/g, '/'));
+}
+
 /**
  * Scan a source tree for universal AI-slop / quality smells.
  * @param {string} root  directory to scan (typically the app dir)
@@ -162,6 +174,7 @@ export function scanUniversal(root) {
 
     const rel = path.relative(absRoot, file) || path.basename(file);
     const lines = text.split('\n');
+    const contentFile = isContentPath(rel);
 
     // --- per-line rules ---
     for (let i = 0; i < lines.length; i++) {
@@ -171,6 +184,7 @@ export function scanUniversal(root) {
       if (i > 0 && IGNORE_RE.test(lines[i - 1])) continue; // suppressed by marker above
       const seen = new Set();
       for (const rule of LINE_RULES) {
+        if (contentFile && rule.kind !== 'secret') continue; // sample material, not app code
         if (seen.has(rule.kind)) continue;           // one hit per kind per line
         if (rule.re.test(line)) {
           seen.add(rule.kind);
@@ -187,6 +201,7 @@ export function scanUniversal(root) {
 
     // --- whole-text (multi-line) rules ---
     for (const rule of TEXT_RULES) {
+      if (contentFile && rule.kind !== 'secret') continue; // sample material, not app code
       rule.re.lastIndex = 0;
       let m;
       while ((m = rule.re.exec(text)) !== null) {

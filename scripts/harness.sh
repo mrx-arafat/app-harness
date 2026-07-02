@@ -10,11 +10,12 @@
 # Usage:
 #   harness.sh detect   <workdir>
 #   harness.sh gate     <workdir> [--out F] [--md F]
-#   harness.sh run      <workdir> start|stop [--port P]
+#   harness.sh run      <workdir> start|stop [--port P] [--prod]
 #   harness.sh verify   <workdir> --surfaces "a,b,c" [--session S] [--out F] [--shots D]
 #   harness.sh quality  <workdir> [--out F]
 #   harness.sh criteria <workdir>
-#   harness.sh preview  <workdir> --surfaces "a,b,c" [--session S] [--shots D]
+#   harness.sh preview  <workdir> --surfaces "a,b,c" [--session S] [--shots D] [--prod]
+#                       (preview also honors HARNESS_PREVIEW_PROD=1)
 #   harness.sh rubric   <workdir>
 #
 # Flags may appear in any order. Exit codes per contract:
@@ -223,6 +224,9 @@ SURFACES=""
 SESSION=""
 SHOTS=""
 PORT=""
+# --prod: serve the production build instead of the dev server (clean screenshots,
+# no dev overlays). The preview verb also honors HARNESS_PREVIEW_PROD=1.
+PROD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -240,6 +244,7 @@ while [ $# -gt 0 ]; do
     --shots=*)    SHOTS="${1#--shots=}"; shift ;;
     --port)       PORT="${2:-}"; shift 2 ;;
     --port=*)     PORT="${1#--port=}"; shift ;;
+    --prod)       PROD=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift ;;
     -*)           log "ignoring unknown flag: $1"; shift ;;
@@ -338,6 +343,7 @@ case "$VERB" in
         fi
         set -- start "$APPDIR"
         [ -n "$PORT" ] && set -- "$@" --port "$PORT"
+        [ "$PROD" = "1" ] && set -- "$@" --prod
         bash "$SCRIPT" "$@"
         exit $?
         ;;
@@ -427,9 +433,15 @@ case "$VERB" in
     SH="${SHOTS:-$HARNESS_DIR/shots}"
     SCRIPT="$(adapter_script "$ADAPTER_ID" verify.sh)"
     RESULT=""
+    # Preview prefers the production build when asked (clean captures, no dev
+    # overlays): --prod flag or HARNESS_PREVIEW_PROD=1. Applies to preview only —
+    # gate/verify boots stay on the fast dev server.
+    PV_PROD="$PROD"
+    [ "${HARNESS_PREVIEW_PROD:-0}" = "1" ] && PV_PROD=1
     if [ -n "$SCRIPT" ]; then
       set -- "$APPDIR" --preview --surfaces "$SURFACES" --shots "$SH"
       [ -n "$SESSION" ] && set -- "$@" --session "$SESSION"
+      [ "$PV_PROD" = "1" ] && set -- "$@" --prod
       RAW="$(bash "$SCRIPT" "$@" 2>/dev/null)"
       if json_valid "$RAW"; then
         HASSHOTS="$(json_field "$RAW" screenshots)"

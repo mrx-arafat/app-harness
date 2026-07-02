@@ -22,6 +22,11 @@ export const meta = {
 // args.minBudget  : stop before a token target dips below this (default 60000)
 // args.maxPivots  : forced discard-and-restart-from-scratch attempts (default 1)
 // args.references : design reference sites to calibrate the evaluator's taste (UI profiles only)
+// args.serialEval : run Pass A then Pass B sequentially instead of in parallel
+//                   (default false). Set true for apps with shared MUTABLE
+//                   server-side state (a real DB) where two concurrent
+//                   evaluators driving the same server could contaminate each
+//                   other's checks. Costs ~2x Evaluate wall-clock.
 // ============================================================================
 const brief = (args && (args.brief || args.prompt)) || (typeof args === 'string' ? args : '')
 let workdir = (args && args.workdir) || '.'
@@ -31,6 +36,7 @@ const candidates = Math.max(1, (args && args.candidates) || 1)
 const minBudget = (args && args.minBudget) || 60_000
 const maxPivots = (args && args.maxPivots != null) ? args.maxPivots : 1
 const references = (args && args.references) || 'Linear, Stripe, Vercel, Notion (clean, intentional, opinionated — NOT generic dashboard templates)'
+const serialEval = !!(args && args.serialEval)
 
 if (!brief) throw new Error('app-harness: args.brief is required (the app description)')
 // Reject a shell-unsafe workdir — paths are interpolated into the commands the executor
@@ -463,10 +469,18 @@ DYNAMIC CONTEXT — pass ${pass + 1}/${maxPasses}:
 - ${liveNote}
 - REGRESSION LOCK (passed earlier, MUST still pass): ${lockList}`
 
-  const [verdictA, verdictB] = await parallel([
-    () => agent(evalAStatic + evalDynamic, { phase: 'Evaluate', label: `eval-A#${pass + 1}`, schema: VERDICT, model: 'opus' }),
-    () => agent(evalBStatic + evalDynamic, { phase: 'Evaluate', label: `eval-B#${pass + 1}`, schema: VERDICT, model: 'opus' }),
-  ])
+  const runA = () => agent(evalAStatic + evalDynamic, { phase: 'Evaluate', label: `eval-A#${pass + 1}`, schema: VERDICT, model: 'opus' })
+  const runB = () => agent(evalBStatic + evalDynamic, { phase: 'Evaluate', label: `eval-B#${pass + 1}`, schema: VERDICT, model: 'opus' })
+  let verdictA = null
+  let verdictB = null
+  if (serialEval) {
+    // Opt-in isolation for apps with shared mutable server-side state: A finishes
+    // (and its interactions settle) before B starts. ~2x wall-clock per pass.
+    verdictA = await runA()
+    verdictB = await runB()
+  } else {
+    ;[verdictA, verdictB] = await parallel([runA, runB])
+  }
 
   // Merge: harsher score per slot.
   const scores = verdictA && verdictB ? {

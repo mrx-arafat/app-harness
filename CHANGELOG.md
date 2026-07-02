@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-02 — Third pass: content-dir false positives, serialEval, prod-build preview
+
+### Added
+- **`serialEval` workflow arg** (default `false`): opt out of parallel Pass A/B for apps
+  with shared mutable server-side state, where two concurrent evaluators driving one
+  server could contaminate each other's checks. ~2× Evaluate wall-clock when enabled.
+- **Production-build preview**: `run.sh start --prod` builds (`<pm> run build`) and
+  serves via the prod script (`start`/`preview`), falling back to the dev server if the
+  build fails. `harness.sh run --prod` passes it through; the `preview` verb honors
+  `--prod` or `HARNESS_PREVIEW_PROD=1`. Kills the dev hot-reload badge/overlays in
+  captured screenshots (verified visually on a live Next.js app). Gate/verify boots stay
+  on the fast dev server.
+
+### Fixed
+- **Teaching/sample content flagged as slop**: code quoted inside lesson text and seed
+  data (`console.log` in a lesson string, example TODOs) was indistinguishable from app
+  code to line rules. Content/sample dirs (`data/`, `content/`, `docs/`, `fixtures/`,
+  `examples/`, `samples/`, `lessons/`) are now exempt from all detectors except
+  `secret` — in both `quality-core` and the web adapter's own detectors. (Bench:
+  100 false positives eliminated; every real app-code hit survived.)
+
 ## 2026-07-02 — Real-world bench fixes (found by running the skill against a live Next.js app)
 
 ### Fixed

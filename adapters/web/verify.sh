@@ -40,6 +40,7 @@ SESSION="${PILOT_SESSION_ID:-harness}"
 OUT=""
 SHOTS=""
 PREVIEW=0
+PROD=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -54,6 +55,7 @@ while [ "$#" -gt 0 ]; do
     --shots)     SHOTS="${2:-}"; shift 2 ;;
     --shots=*)   SHOTS="${1#--shots=}"; shift ;;
     --preview)   PREVIEW=1; shift ;;
+    --prod)      PROD=1; shift ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' >&2
       exit 0
@@ -261,8 +263,12 @@ if [ -n "$_ext_pid" ] && [ -n "$_ext_port" ] && kill -0 "$_ext_pid" 2>/dev/null 
   BASE_URL="http://127.0.0.1:${_ext_port}"
   log "reusing already-running server: base=$BASE_URL pid=$_ext_pid (will NOT stop it)"
 else
-  log "booting app: $APPDIR_ABS"
-  BOOT_OUT="$("$SCRIPT_DIR/run.sh" start "$APPDIR_ABS" 2>>"$VERIFY_LOG")"
+  log "booting app: $APPDIR_ABS$([ "$PROD" -eq 1 ] && printf ' (prod build)')"
+  if [ "$PROD" -eq 1 ]; then
+    BOOT_OUT="$("$SCRIPT_DIR/run.sh" start "$APPDIR_ABS" --prod 2>>"$VERIFY_LOG")"
+  else
+    BOOT_OUT="$("$SCRIPT_DIR/run.sh" start "$APPDIR_ABS" 2>>"$VERIFY_LOG")"
+  fi
   READY_LINE="$(printf '%s\n' "$BOOT_OUT" | grep '^READY ' | head -1)"
 
   if [ -z "$READY_LINE" ]; then

@@ -200,6 +200,15 @@ function scanFile(filePath, appDir, signals) {
   const lines = content.split('\n');
   const hits = [];
 
+  // Content/sample-material dirs (mirrors quality-core's isContentPath): lesson
+  // text and seed data quote code as STRINGS — "console.log(...)" inside a lesson
+  // is teaching material, not leftover debug logging, and line rules can't see
+  // string boundaries. Skip these files here; quality-core still reports `secret`
+  // hits in them (a leaked key is a finding wherever it lives).
+  if (/(^|\/)(data|content|docs|fixtures|examples|samples|lessons)(\/|$)/.test(relPath.replace(/\\/g, '/'))) {
+    return hits;
+  }
+
   for (const det of DETECTORS) {
     if (det.exts !== null && !det.exts.has(ext)) continue;
     if (det.skipTest && isTest) continue;
