@@ -317,6 +317,7 @@ case "$VERB" in
     fi
     JSON="$(bash "$SCRIPT" "$APPDIR" --out "$O" --md "$M")"
     if ! json_valid "$JSON"; then
+      log "WARNING: gate output was not valid JSON (${#JSON} bytes captured) — substituting a failing gate result"
       JSON='{"passed":false,"blocking":1,"summary":"gate.sh produced invalid JSON","checks":[]}'
     fi
     printf '%s' "$JSON" > "$CANON" 2>/dev/null
@@ -369,6 +370,7 @@ case "$VERB" in
     JSON="$(bash "$SCRIPT" "$@")"
     RC=$?
     if ! json_valid "$JSON"; then
+      log "WARNING: verify output was not valid JSON (${#JSON} bytes captured) — substituting an empty probe result"
       JSON='{"baseUrl":"","routesProbed":0,"consoleErrorsTotal":0,"blankScreens":0,"surfaces":[],"routes":[]}'
       RC=1
     fi
@@ -389,6 +391,9 @@ case "$VERB" in
       JSON="$(node "$SCRIPT_DIR/lib/quality-core.mjs" "$APPDIR" 2>/dev/null)"
     fi
     if ! json_valid "$JSON"; then
+      # Loud, not silent: a zeroed fallback here once masked a truncated-stdout bug
+      # for every real-sized app (quality reported clean when it wasn't).
+      log "WARNING: quality output was not valid JSON (${#JSON} bytes captured) — substituting an EMPTY slop result; the scan is NOT actually clean"
       JSON='{"total":0,"byKind":{},"hits":[]}'
     fi
     printf '%s' "$JSON" > "$CANON" 2>/dev/null

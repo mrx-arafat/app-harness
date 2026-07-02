@@ -116,6 +116,33 @@ fi
 cleanup_wt "$WT"
 
 # ---------------------------------------------------------------------------
+# 6b. quality.mjs — LARGE output survives a pipe intact (regression: a
+#     process.exit(0) after a >64KB stdout write truncated the JSON mid-object;
+#     json_valid then rejected it and the dispatcher silently reported total=0).
+#     Generate thousands of hits so stdout far exceeds the 64KB pipe buffer,
+#     capture through a real pipe, and require (a) parseable JSON, (b) an exact
+#     total, (c) the capped hits list + hitsTruncated accounting.
+# ---------------------------------------------------------------------------
+WT="$(stage good-vite)"
+mkdir -p "$WT/app/src/big"
+i=0
+while [ "$i" -lt 40 ]; do
+  { j=0; while [ "$j" -lt 60 ]; do printf 'console.log("debug line %d in file %d with enough padding text to inflate the snippet size well past the pipe buffer");\n' "$j" "$i"; j=$((j+1)); done; } > "$WT/app/src/big/gen$i.ts"
+  i=$((i+1))
+done
+BIG="$(node "$ADAPTER_DIR/quality.mjs" "$WT/app" --out "$WT/slop.json" 2>/dev/null | cat)"
+BIG_TOTAL="$(printf '%s' "$BIG" | jq -r '.total' 2>/dev/null)"
+BIG_HITS="$(printf '%s' "$BIG" | jq -r '.hits | length' 2>/dev/null)"
+BIG_TRUNC="$(printf '%s' "$BIG" | jq -r '.hitsTruncated' 2>/dev/null)"
+if [ -n "$BIG_TOTAL" ] && [ "$BIG_TOTAL" -ge 2400 ] 2>/dev/null \
+   && [ "$BIG_HITS" = "100" ] && [ "$BIG_TRUNC" = "$((BIG_TOTAL - 100))" ]; then
+  ok "quality large output survives a pipe (total=$BIG_TOTAL hits capped at $BIG_HITS, truncated=$BIG_TRUNC)"
+else
+  notok "quality large output survives a pipe (total=$BIG_TOTAL hits=$BIG_HITS trunc=$BIG_TRUNC; parse failed or cap wrong)"
+fi
+cleanup_wt "$WT"
+
+# ---------------------------------------------------------------------------
 # 7. gate.sh — no dev/start/serve/preview script => boot SKIPs cleanly (not fail),
 #    and the gate still passes overall (skip is not a blocking failure).
 # ---------------------------------------------------------------------------

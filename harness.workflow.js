@@ -165,7 +165,7 @@ const budgetLow = () => budget.total && budget.remaining() < minBudget
 // adapter-agnostic.
 // ============================================================================
 const runScript = (cmd, label, phase, schema) => agent(
-  `You are a SHELL EXECUTOR. Run EXACTLY the one command below and nothing else. It is a deterministic harness script that prints JSON to stdout (human logs go to stderr — ignore them). Return ONLY what it prints to stdout${schema ? ', as the structured result' : ' (verbatim)'}. Do NOT interpret, summarize, add prose, fix, or run any other command. If the command exits non-zero, STILL return whatever JSON it printed on stdout.
+  `You are a SHELL EXECUTOR. Run EXACTLY the one command below and nothing else. It is a deterministic harness script that prints JSON to stdout (human logs go to stderr — ignore them). It may legitimately run for several minutes (package installs, builds, browser crawls) — pass timeout 600000 to the Bash tool and wait; do NOT abandon or re-run it early. Return ONLY what it prints to stdout${schema ? ', as the structured result' : ' (verbatim)'}. Do NOT interpret, summarize, add prose, fix, or run any other command. If the command exits non-zero, STILL return whatever JSON it printed on stdout.
 
 \`\`\`bash
 ${cmd}
@@ -360,7 +360,15 @@ if (prep0 && Array.isArray(prep0.surfaces) && prep0.surfaces.length) surfaces = 
 // sessions, and restarted only after a fix touches the source. Kills the old
 // 3-boots-per-pass pattern (verify boot + eval-A boot + eval-B boot).
 const isServerAdapter = adapterId === 'web'
-const bootCmd = `pid=$(cat "${metaDir}/server.pid" 2>/dev/null); port=$(cat "${metaDir}/server.port" 2>/dev/null); if [ -n "$pid" ] && [ -n "$port" ] && kill -0 "$pid" 2>/dev/null && curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$port/"; then printf '{"baseUrl":"http://127.0.0.1:%s"}\\n' "$port"; else bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1; line=$(bash "${scriptsDir}/harness.sh" run "${workdir}" start 2>/dev/null | grep '^READY ' | head -1); printf '{"baseUrl":"%s"}\\n' "$(printf '%s' "$line" | awk '{print $4}')"; fi`
+
+// Per-run browser session ids. Deterministic hash of the workdir (no Date/random in
+// workflow scripts) keeps two concurrent harness runs on one machine from sharing a
+// playwright-cli session, and stays under the ~20-char socket-path budget.
+const wdTag = Array.from(workdir).reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 0).toString(36).slice(0, 6)
+const sessionA = `ha-${wdTag}`
+const sessionB = `hb-${wdTag}`
+
+const bootCmd =`pid=$(cat "${metaDir}/server.pid" 2>/dev/null); port=$(cat "${metaDir}/server.port" 2>/dev/null); if [ -n "$pid" ] && [ -n "$port" ] && kill -0 "$pid" 2>/dev/null && curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$port/"; then printf '{"baseUrl":"http://127.0.0.1:%s"}\\n' "$port"; else bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1; line=$(bash "${scriptsDir}/harness.sh" run "${workdir}" start 2>/dev/null | grep '^READY ' | head -1); printf '{"baseUrl":"%s"}\\n' "$(printf '%s' "$line" | awk '{print $4}')"; fi`
 
 // ---- Evaluator prompts: STATIC blocks built ONCE (byte-identical every pass, so a
 // prompt-prefix cache can hit); per-pass dynamic context is appended at the END.
@@ -382,7 +390,7 @@ Deterministic artifacts ALREADY computed for you (read them — do not re-derive
 Method:
 1. Read criteria.json + probe.json FIRST. probe.json already tells you which surfaces load, their status, errors, and blank/empty flags — don't re-check what it covered.
 2. If ${findingsPath} exists, its items are exactly what the last fix attempt claims to have fixed — verify EACH of them first. One still broken = the fix failed; record it again with a note that the previous fix did not hold.
-3. Exercise the live app ONLY for criteria that need real interaction: for UI apps drive with playwright-cli (session: -s=harness-a); for CLI apps run the commands and inspect stdout/stderr/exit; for services call the endpoints/tools. If an action fails, re-check then retry ONCE with a corrective step (reload / wait for element / alternate selector / re-invoke) before recording FAIL.
+3. Exercise the live app ONLY for criteria that need real interaction: for UI apps drive with playwright-cli (session: -s=${sessionA}; when you finish, run playwright-cli -s=${sessionA} close); for CLI apps run the commands and inspect stdout/stderr/exit; for services call the endpoints/tools. A second evaluator may be exercising the same running app concurrently in its own browser session — tolerate its activity and avoid destructive global actions (wiping storage/data you did not create). If an action fails, re-check then retry ONCE with a corrective step (reload / wait for element / alternate selector / re-invoke) before recording FAIL.
 4. Check EVERY acceptance criterion in ${specPath} AND every held-out check in ${holdoutPath}. Record PASS/FAIL + reason.
 5. Re-verify EVERY id in the REGRESSION LOCK (dynamic context below). Any now failing go in "regressions" (blocking).
 
@@ -401,7 +409,7 @@ Deterministic artifacts ALREADY computed (read them FIRST — they focus your hu
 - ${metaDir}/slop.json — static hits with kind + weight + file:line (universal tells: TODO/FIXME, empty catch, debug logs, dummy data, hardcoded secrets — plus platform tells, e.g. for UI: gradient-text, ai-purple, shadcn-default, tasteful-default, neon-glow, emoji-icon, copy-cliche). Weight 3 = strong tell. Verify high-weight hits in the running artifact and treat confirmed ones as primary/secondary evidence.
 - ${metaDir}/probe.json — errors + blank/empty surfaces + artifact paths (screenshots for UI, captured stdout/stderr for CLI/service). For UI, INSPECT the screenshot PNGs on disk for overlapping text, misalignment, zero-contrast, clipping, broken responsive layout. For non-UI, inspect the captured output for stack traces, garbled formatting, missing error handling.
 
-Then probe what static analysis can't see, exercising the live artifact (UI session: -s=harness-b; re-check + retry once on action failure):
+Then probe what static analysis can't see, exercising the live artifact (UI session: -s=${sessionB}, run playwright-cli -s=${sessionB} close when finished; the correctness evaluator may be driving the same app concurrently in its own session — tolerate its activity, no destructive global actions; re-check + retry once on action failure):
 - UI: dead buttons/links, missing empty states, edge inputs (empty/very long/special chars, back/forward, double-submit), spec drift.
 - CLI/service: invalid flags/inputs, malformed requests, empty result sets, piped stdin, non-zero exits, unhandled errors, spec drift.
 - Held-out checks: Pass A sweeps ALL of them — you SPOT-CHECK only the 2-3 most gameable ones (implied behavior a spec-pattern-matching build would fake).
@@ -517,10 +525,13 @@ DYNAMIC CONTEXT — pass ${pass + 1}/${maxPasses}:
       adapter: adapterId, weightedAggregate: agg, scores: s, regressions, holdoutFailures,
       lockedCount: locked.size, pivotsUsed, needsHuman, scoreHistory,
     })
+    // A findings line that happens to equal the heredoc delimiter would terminate
+    // the write early — neutralize it (evaluator text is untrusted input here).
+    const hd = (t) => String(t || '').split('\n').map(l => l.trim() === 'HARNESS_FINDINGS_EOF' ? `\\${l}` : l).join('\n')
     const findingsMd = [
       `# Findings — pass ${pass + 1}/${maxPasses} (${verdict.clean ? 'clean' : `${verdict.issues || 0} open`})`,
-      (verdictA && verdictA.findings) ? `\n## Correctness (Pass A)\n${verdictA.findings}` : '',
-      (verdictB && verdictB.findings) ? `\n## Quality (Pass B)\n${verdictB.findings}` : '',
+      (verdictA && verdictA.findings) ? `\n## Correctness (Pass A)\n${hd(verdictA.findings)}` : '',
+      (verdictB && verdictB.findings) ? `\n## Quality (Pass B)\n${hd(verdictB.findings)}` : '',
       regressions.length ? `\n## Regressions (blocking — fix FIRST)\n${regressions.map(r => `- [ ] ${r} regressed — previously passed, must pass again`).join('\n')}` : '',
     ].filter(Boolean).join('\n')
     await runScript(

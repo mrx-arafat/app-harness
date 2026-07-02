@@ -385,7 +385,19 @@ async function main() {
     byWeight[h.weight] = (byWeight[h.weight] || 0) + 1;
   }
 
-  const result = { total: hits.length, byKind, byWeight, hits };
+  // Cap the hits detail at the 100 heaviest: totals/byKind/byWeight stay exact,
+  // but a real-world scan can produce hundreds of weight-1 hits whose snippets
+  // balloon slop.json to ~100KB — all of it read into the (opus) evaluator's
+  // context. The evaluator is told to verify HIGH-weight hits; the tail adds
+  // cost, not signal. hitsTruncated tells readers the detail list is partial.
+  const MAX_HITS = 100;
+  const rankedHits = [...hits].sort((a, b) => b.weight - a.weight);
+  const cappedHits = rankedHits.slice(0, MAX_HITS);
+  const result = {
+    total: hits.length, byKind, byWeight,
+    hits: cappedHits,
+    hitsTruncated: Math.max(0, hits.length - cappedHits.length),
+  };
   const json = JSON.stringify(result, null, 2);
   process.stdout.write(json + '\n');
 

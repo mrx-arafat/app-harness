@@ -160,7 +160,7 @@ fi
 GATE_KEYS="blocking,checks,passed,summary"
 PROBE_KEYS="baseUrl,blankScreens,consoleErrorsTotal,routes,routesProbed,surfaces"
 SLOP_KEYS="byKind,hits,total"
-SLOP_KEYS_WEB="byKind,byWeight,hits,total"
+SLOP_KEYS_WEB="byKind,byWeight,hits,hitsTruncated,total"
 
 if [ "$HARNESS_OK" -eq 0 ]; then
   section "harness.sh unavailable / detect unsupported — skipping all conformance"

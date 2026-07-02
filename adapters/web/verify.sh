@@ -305,6 +305,16 @@ for SURFACE in $SURFACE_LIST; do
   # trim leading/trailing whitespace
   SURFACE="$(printf '%s' "$SURFACE" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   [ -z "$SURFACE" ] && continue
+  # Endpoint-style surfaces ("VERB /path" from the criteria extractor): a GET is
+  # just a navigable path — strip the verb. Other verbs can't be exercised by a
+  # browser navigation; probing them as literal URLs ("/POST /api/x") would only
+  # manufacture false 404s/blanks, so skip them (the evaluator drives those).
+  case "$SURFACE" in
+    "GET "*) SURFACE="${SURFACE#GET }" ;;
+    "POST "*|"PUT "*|"PATCH "*|"DELETE "*|"HEAD "*|"OPTIONS "*)
+      log "skipping non-GET endpoint surface: $SURFACE"
+      continue ;;
+  esac
   # ensure leading slash
   case "$SURFACE" in /*) : ;; *) SURFACE="/$SURFACE" ;; esac
 
@@ -379,12 +389,17 @@ for SURFACE in $SURFACE_LIST; do
   : > "$ERRS_FILE"
   if [ -n "$LOG_REL" ] && [ -f "$LOG_REL" ]; then
     # Keep real error lines; drop header lines, blanks, and indented stack frames.
+    # Cap at 20 lines per surface: an error-spamming app (render loop logging per
+    # frame) would otherwise balloon probe.json — which is read verbatim into the
+    # evaluator's context — with thousands of identical lines. The final line
+    # records how many were dropped so the signal ("it spams errors") survives.
     awk '
       /^Total messages:/ {next}
       /^Returning /      {next}
       /^[[:space:]]*$/   {next}
       /^[[:space:]]/     {next}
-      {print}
+      { n++; if (n <= 20) print }
+      END { if (n > 20) printf "(+%d more error lines truncated)\n", n - 20 }
     ' "$LOG_REL" > "$ERRS_FILE"
   fi
 

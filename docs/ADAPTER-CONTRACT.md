@@ -127,9 +127,13 @@ Flag parsing must tolerate flags in any order. Unknown adapter id → fall back 
   (TODO/FIXME, empty catch, debug logs, dummy data `john@`/`example.com`, hardcoded secrets/api keys)
   and merge its own platform kinds. Exit 0 always (advisory). Fast (< a few seconds), dep-free.
 - Required top-level keys are exactly `total`/`byKind`/`hits` for every adapter. The `web` adapter
-  additionally emits a `byWeight` object (`{"1":n,"2":n,"3":n}`, hit counts per weight tier) as a
-  documented, additive extension consumed by `status.sh`'s weighted slop summary — this is the
-  ONE sanctioned exception to "exactly these keys"; new adapters should not add further ad hoc keys
+  additionally emits two documented, additive extensions: a `byWeight` object
+  (`{"1":n,"2":n,"3":n}`, hit counts per weight tier) consumed by `status.sh`'s weighted slop
+  summary, and `hitsTruncated` (integer): `hits` carries only the 100 heaviest hits — a
+  real-world scan can produce hundreds of weight-1 hits whose snippets balloon the JSON that the
+  evaluator reads into context — and `hitsTruncated` records how many were dropped
+  (`total` stays exact; `byKind`/`byWeight` are computed before capping). These are the ONLY
+  sanctioned exceptions to "exactly these keys"; new adapters should not add further ad hoc keys
   without updating this contract.
 
 ## 8. CRITERIA JSON (byte-stable — `scripts/extract-criteria.mjs`)
