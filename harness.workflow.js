@@ -94,12 +94,19 @@ const GATE = {
 
 const PREP = {
   type: 'object', additionalProperties: false,
-  required: ['surfaces', 'slopTotal', 'consoleErrors', 'blankScreens'],
+  required: ['surfaces'],
   properties: {
     surfaces: { type: 'array', items: { type: 'string' }, description: 'surface tokens extracted from spec.md (routes / invocations / screens / endpoints) for the evaluator + preview' },
-    slopTotal: { type: 'integer', description: 'total slop hits from slop.json' },
-    consoleErrors: { type: 'integer', description: 'total errors from probe.json' },
-    blankScreens: { type: 'integer', description: 'count of surfaces that rendered blank/empty from probe.json' },
+  },
+}
+
+// Server boot handshake for adapters with a long-lived server (web). One shared
+// instance powers the pass's verify probe AND both evaluators.
+const BOOT = {
+  type: 'object', additionalProperties: false,
+  required: ['baseUrl'],
+  properties: {
+    baseUrl: { type: 'string', description: 'base URL of the running app server, "" if boot failed' },
   },
 }
 
@@ -124,10 +131,11 @@ const ADAPTERINFO = {
 
 const VERDICT = {
   type: 'object', additionalProperties: false,
-  required: ['clean', 'issues', 'summary', 'scores', 'pivot', 'passedCriteria', 'regressions', 'holdoutFailures'],
+  required: ['clean', 'issues', 'summary', 'scores', 'pivot', 'passedCriteria', 'regressions', 'holdoutFailures', 'findings'],
   properties: {
     clean: { type: 'boolean', description: 'true if app meets every acceptance + held-out criterion, no blocking bugs, no regressions' },
-    issues: { type: 'integer', description: 'count of open issues written to findings.md' },
+    issues: { type: 'integer', description: 'count of open issues listed in the findings field' },
+    findings: { type: 'string', description: 'markdown checklist of every failing item — one line per failure: "- [ ] <id> <surface>: EXPECTED ... | ACTUAL ... | REPRO ... | FIX ...". Empty string when none. The workflow writes this to findings.md — do NOT write files yourself.' },
     summary: { type: 'string' },
     passedCriteria: { type: 'array', items: { type: 'string' }, description: 'ids of every acceptance criterion that PASSED this pass — locked against backslide' },
     regressions: { type: 'array', items: { type: 'string' }, description: 'criteria that passed in a prior pass but FAIL now (blocking)' },
@@ -254,14 +262,24 @@ if (candidates > 1) {
   const gates = await parallel(candWds.map((w, i) => () =>
     runScript(`bash "${scriptsDir}/harness.sh" gate "${w}"`, `gate-c${i + 1}`, 'Generate', GATE)))
 
-  const pick = await agent(
-    `You are the SELECTOR. ${candidates} candidate builds were produced. Deterministic machine-gate results (platform build/typecheck/lint/test/boot):
+  // perf: when exactly ONE candidate gate-passes, "which build is best" is not a
+  // judgment call — skip the opus Selector and promote it deterministically. The
+  // Selector only runs for genuine ties (>=2 passes) or all-fail (least-bad pick).
+  const passedIdx = gates.reduce((acc, g, i) => (g && g.passed ? acc.concat(i) : acc), [])
+  let winnerIdx = 0
+  if (passedIdx.length === 1) {
+    winnerIdx = passedIdx[0]
+    log(`selector skipped: candidate ${winnerIdx + 1} is the only gate pass`)
+  } else {
+    const pick = await agent(
+      `You are the SELECTOR. ${candidates} candidate builds were produced. Deterministic machine-gate results (platform build/typecheck/lint/test/boot):
 ${candApps.map((d, i) => `[${i}] ${d}: ${gates[i] ? (gates[i].passed ? 'GATE PASS' : `GATE FAIL (${gates[i].blocking})`) + ' — ' + gates[i].summary : 'gate died'}`).join('\n')}
 
 Briefly inspect each candidate app dir against ${specPath} (structure, feature coverage, and — for UI apps only — design quality vs the references bar: ${references}). Pick the single best build. Prefer gate passes; among those, the most complete, cleanest, and least generic. ${SANDBOX} Return the 0-based index.`,
-    { phase: 'Generate', label: 'select', schema: SELECT, model: 'opus' }
-  )
-  const winnerIdx = (pick && pick.index) || 0
+      { phase: 'Generate', label: 'select', schema: SELECT, model: 'opus' }
+    )
+    winnerIdx = (pick && pick.index) || 0
+  }
   const winnerApp = candApps[winnerIdx]
   // perf: promotion is pure mechanical file movement (rm/mv/rm + state append) — no judgment.
   // Downgraded from a sonnet agent() to a deterministic haiku shell-exec (routing discipline:
@@ -331,16 +349,86 @@ let surfaces = ['/']
 // slopTotal return value was never read (only prep0.surfaces is consumed). Eliminates one full
 // slop scan (dispatcher round-trip) per run.
 const prep0 = await runScript(
-  `bash "${scriptsDir}/harness.sh" criteria "${workdir}" >/dev/null && jq -n --argjson c "$(cat "${metaDir}/criteria.json")" '{surfaces:($c.surfaces // $c.routes // []), slopTotal:0, consoleErrors:0, blankScreens:0}'`,
+  `bash "${scriptsDir}/harness.sh" criteria "${workdir}" >/dev/null && jq -n --argjson c "$(cat "${metaDir}/criteria.json")" '{surfaces:($c.surfaces // $c.routes // [])}'`,
   'prep-criteria', 'Evaluate', PREP
 )
 if (prep0 && Array.isArray(prep0.surfaces) && prep0.surfaces.length) surfaces = prep0.surfaces
+
+// Server-backed adapters (web) get ONE shared server instance per pass: booted (or
+// reused if still healthy) before prep, probed by verify.sh (which detects and reuses
+// it instead of booting its own), driven by BOTH evaluators via separate browser
+// sessions, and restarted only after a fix touches the source. Kills the old
+// 3-boots-per-pass pattern (verify boot + eval-A boot + eval-B boot).
+const isServerAdapter = adapterId === 'web'
+const bootCmd = `pid=$(cat "${metaDir}/server.pid" 2>/dev/null); port=$(cat "${metaDir}/server.port" 2>/dev/null); if [ -n "$pid" ] && [ -n "$port" ] && kill -0 "$pid" 2>/dev/null && curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$port/"; then printf '{"baseUrl":"http://127.0.0.1:%s"}\\n' "$port"; else bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1; line=$(bash "${scriptsDir}/harness.sh" run "${workdir}" start 2>/dev/null | grep '^READY ' | head -1); printf '{"baseUrl":"%s"}\\n' "$(printf '%s' "$line" | awk '{print $4}')"; fi`
+
+// ---- Evaluator prompts: STATIC blocks built ONCE (byte-identical every pass, so a
+// prompt-prefix cache can hit); per-pass dynamic context is appended at the END.
+const FINDING_FORMAT = `Findings format (the "findings" verdict field — one line per failure, "" when none):
+- [ ] <id> <surface>: EXPECTED <spec behavior> | ACTUAL <what you observed> | REPRO <minimal steps> | FIX <file/component hint>`
+
+const evalAStatic = `You are the EVALUATOR (Pass A — Correctness). You judge a build produced by a separate generator agent. You WRITE NOTHING to disk — your only output is the structured verdict; the workflow merges your "findings" field into findings.md.
+
+ADAPTER RUBRIC (what the score slots mean for THIS app — read carefully):
+${rubricText}
+
+Locations: app at ${appPath}; public spec at ${specPath}; held-out checks at ${holdoutPath} (you MAY read these, the generator may not).
+
+Deterministic artifacts ALREADY computed for you (read them — do not re-derive):
+- ${metaDir}/criteria.json — parsed acceptance/holdout ids + surfaces
+- ${metaDir}/probe.json — per-surface status, errors, blank/empty flags, artifact (screenshot or captured-output) paths
+- ${metaDir}/gate.md — machine gate result (platform build/typecheck/lint/test/boot already PASSED)
+
+Method:
+1. Read criteria.json + probe.json FIRST. probe.json already tells you which surfaces load, their status, errors, and blank/empty flags — don't re-check what it covered.
+2. If ${findingsPath} exists, its items are exactly what the last fix attempt claims to have fixed — verify EACH of them first. One still broken = the fix failed; record it again with a note that the previous fix did not hold.
+3. Exercise the live app ONLY for criteria that need real interaction: for UI apps drive with playwright-cli (session: -s=harness-a); for CLI apps run the commands and inspect stdout/stderr/exit; for services call the endpoints/tools. If an action fails, re-check then retry ONCE with a corrective step (reload / wait for element / alternate selector / re-invoke) before recording FAIL.
+4. Check EVERY acceptance criterion in ${specPath} AND every held-out check in ${holdoutPath}. Record PASS/FAIL + reason.
+5. Re-verify EVERY id in the REGRESSION LOCK (dynamic context below). Any now failing go in "regressions" (blocking).
+
+${FINDING_FORMAT}
+
+Return passedCriteria, regressions, holdoutFailures, findings, and the four rubric scores 1-3 (functionality, primary, secondary, craft — per the ADAPTER RUBRIC above). Set pivot=true if primary OR secondary is 1. clean=true ONLY when every acceptance + held-out criterion passes with no regressions. ${SANDBOX}`
+
+const evalBStatic = `You are the EVALUATOR (Pass B — Adversarial Quality). The build in front of you is worse than it looks — your job is to prove it. You WRITE NOTHING to disk — your only output is the structured verdict; the workflow merges your "findings" field into findings.md.
+
+ADAPTER RUBRIC (what the score slots mean for THIS app — read carefully):
+${rubricText}
+
+Locations: app at ${appPath}; spec at ${specPath}; held-out checks at ${holdoutPath}.
+
+Deterministic artifacts ALREADY computed (read them FIRST — they focus your hunt):
+- ${metaDir}/slop.json — static hits with kind + weight + file:line (universal tells: TODO/FIXME, empty catch, debug logs, dummy data, hardcoded secrets — plus platform tells, e.g. for UI: gradient-text, ai-purple, shadcn-default, tasteful-default, neon-glow, emoji-icon, copy-cliche). Weight 3 = strong tell. Verify high-weight hits in the running artifact and treat confirmed ones as primary/secondary evidence.
+- ${metaDir}/probe.json — errors + blank/empty surfaces + artifact paths (screenshots for UI, captured stdout/stderr for CLI/service). For UI, INSPECT the screenshot PNGs on disk for overlapping text, misalignment, zero-contrast, clipping, broken responsive layout. For non-UI, inspect the captured output for stack traces, garbled formatting, missing error handling.
+
+Then probe what static analysis can't see, exercising the live artifact (UI session: -s=harness-b; re-check + retry once on action failure):
+- UI: dead buttons/links, missing empty states, edge inputs (empty/very long/special chars, back/forward, double-submit), spec drift.
+- CLI/service: invalid flags/inputs, malformed requests, empty result sets, piped stdin, non-zero exits, unhandled errors, spec drift.
+- Held-out checks: Pass A sweeps ALL of them — you SPOT-CHECK only the 2-3 most gameable ones (implied behavior a spec-pattern-matching build would fake).
+
+CALIBRATION (UI profiles only): judge the primary/secondary design slots against: ${references}. Anything a model would emit by default is a 1, not a 2. When uncertain between 1 and 2 on a UI design slot, choose 1. (For non-UI adapters, ignore the references and calibrate per the ADAPTER RUBRIC's descriptors.)
+
+${FINDING_FORMAT}
+
+RUBRIC (1-3, primary + secondary are WEIGHTED x2): functionality, primary, secondary, craft — as defined in the ADAPTER RUBRIC above. Set pivot=true if primary OR secondary scores 1 (slop/weak foundation to discard, not patch). clean=false if ANY quality issue or held-out failure. Return passedCriteria, regressions, holdoutFailures, findings, pivot, all four scores. ${SANDBOX}`
 
 for (let pass = 0; pass < maxPasses; pass++) {
   if (budgetLow()) { needsHuman = true; log(`stopping: token budget below ${minBudget}`); break }
 
   const lockList = locked.size ? [...locked].join(' | ') : '(none yet)'
   const surfaceArg = surfaces.join(',')
+
+  // ONE shared server per pass (web): boot (or reuse a still-healthy instance) BEFORE
+  // prep so verify.sh probes it instead of booting its own, and both evaluators drive
+  // it via separate browser sessions instead of each starting a second/third copy.
+  let baseUrl = ''
+  if (isServerAdapter) {
+    const boot = await runScript(bootCmd, `boot#${pass + 1}`, 'Evaluate', BOOT)
+    baseUrl = (boot && boot.baseUrl) || ''
+  }
+  const liveNote = baseUrl
+    ? `The app server is ALREADY RUNNING at ${baseUrl} — drive it there. Do NOT install deps, start, restart, or stop the server yourself.`
+    : `Read the app's run command and boot it yourself if needed; stop anything you started when done.`
 
   // Pre-compute deterministic artifacts for THIS pass: quality (slop) + live verify (probe).
   // Writes .harness/slop.json + .harness/probe.json (errors, status, blank/empty surfaces,
@@ -357,59 +445,20 @@ for (let pass = 0; pass < maxPasses; pass++) {
     `prep#${pass + 1}`, 'Evaluate'
   )
 
-  // Pass A — correctness: drive every acceptance criterion.
-  const verdictA = await agent(
-    `You are the EVALUATOR (Pass A — Correctness). App at ${appPath}; public spec at ${specPath}; held-out checks at ${holdoutPath} (you MAY read these, the generator may not).
+  // Pass A (correctness) + Pass B (adversarial quality) run in PARALLEL — they are
+  // independent judges by design (DESIGN.md) and no longer race on findings.md
+  // (findings come back in the verdict; the workflow owns the file write below).
+  // Distinct browser sessions (harness-a / harness-b) keep their live driving isolated.
+  const evalDynamic = `
 
-ADAPTER RUBRIC (what the score slots mean for THIS app — read carefully):
-${rubricText}
+DYNAMIC CONTEXT — pass ${pass + 1}/${maxPasses}:
+- ${liveNote}
+- REGRESSION LOCK (passed earlier, MUST still pass): ${lockList}`
 
-Deterministic artifacts ALREADY computed for you (read them — do not re-derive):
-- ${metaDir}/criteria.json — parsed acceptance/holdout ids + surfaces
-- ${metaDir}/probe.json — per-surface status, errors, blank/empty flags, artifact (screenshot or captured-output) paths
-- ${metaDir}/gate.md — machine gate result (platform build/typecheck/lint/test/boot already PASSED)
-
-Steps:
-1. Read criteria.json + probe.json first. probe.json already tells you which surfaces load, their status, errors, and blank/empty flags — use it; don't re-check what it covered.
-2. Exercise the app (read its run command) ONLY for criteria that need real execution: for UI apps drive with playwright-cli (session: -s="\${PILOT_SESSION_ID:-harness}"); for CLI apps run the commands and inspect stdout/stderr/exit; for services call the endpoints/tools. If an action fails, re-check then retry once with a corrective step before marking FAIL.
-3. Check EVERY acceptance criterion in ${specPath} AND every held-out check in ${holdoutPath}. Record PASS/FAIL + reason.
-4. REGRESSION LOCK — these passed earlier and MUST still pass: ${lockList}. Any now failing go in "regressions" (blocking).
-5. Write failing items to ${findingsPath} as a fresh markdown checklist ("- [ ] id area: problem -> fix"). Overwrite. Append "phase=eval pass=${pass + 1}A" to ${statePath}.
-
-Return passedCriteria, regressions, holdoutFailures, and the four rubric scores 1-3 (functionality, primary, secondary, craft — per the ADAPTER RUBRIC above). Set pivot=true if primary OR secondary is 1. clean=true ONLY when every acceptance + held-out criterion passes with no regressions. ${SANDBOX}`,
-    { phase: 'Evaluate', label: `eval-A#${pass + 1}`, schema: VERDICT, model: 'opus' }
-  )
-
-  // Pass B — adversarial quality: hunt slop / weakness, leaning on slop.json + artifacts.
-  // perf: if Pass A alone already forces a pivot (primary or secondary == 1) AND a pivot is
-  // still available, the whole build is about to be DISCARDED and rebuilt from spec.md — Pass B's
-  // adversarial findings would be thrown away (the pivot generator reads spec.md, not findings.md).
-  // Skip the second opus evaluator entirely in that case; the merge/pivot logic below already
-  // tolerates verdictB === null (verdictA alone drives wantsPivot and the pivot branch). We do
-  // NOT skip B merely because A is "clean" — B is the sole quality/slop judge, so that would
-  // blind the primary/secondary design dimensions.
-  const aWantsPivot = !!(verdictA && (verdictA.pivot || (verdictA.scores && (verdictA.scores.primary === 1 || verdictA.scores.secondary === 1))))
-  const skipB = aWantsPivot && pivotsUsed < maxPivots && !budgetLow()
-  const verdictB = skipB ? null : await agent(
-    `You are the EVALUATOR (Pass B — Adversarial Quality). App at ${appPath}; spec at ${specPath}; held-out checks at ${holdoutPath}.
-
-ADAPTER RUBRIC (what the score slots mean for THIS app — read carefully):
-${rubricText}
-
-Deterministic artifacts ALREADY computed (read them FIRST — they focus your hunt):
-- ${metaDir}/slop.json — static hits with kind + weight + file:line (universal tells: TODO/FIXME, empty catch, debug logs, dummy data, hardcoded secrets — plus platform tells, e.g. for UI: gradient-text, ai-purple, shadcn-default, tasteful-default, neon-glow, emoji-icon, copy-cliche). Weight 3 = strong tell. Verify high-weight hits in the running artifact and treat confirmed ones as primary/secondary evidence.
-- ${metaDir}/probe.json — errors + blank/empty surfaces + artifact paths (screenshots for UI, captured stdout/stderr for CLI/service). For UI, INSPECT the screenshot PNGs on disk for overlapping text, misalignment, zero-contrast, clipping, broken responsive layout. For non-UI, inspect the captured output for stack traces, garbled formatting, missing error handling.
-
-Then probe what static analysis can't see, exercising the live artifact (re-check + retry once on action failure):
-- UI: dead buttons/links, missing empty states, edge inputs (empty/very long/special chars, back/forward, double-submit), spec drift.
-- CLI/service: invalid flags/inputs, malformed requests, empty result sets, piped stdin, non-zero exits, unhandled errors, spec drift.
-- Re-verify held-out checks in ${holdoutPath} — a build that games the visible spec fails here.
-
-CALIBRATION (UI profiles only): judge the primary/secondary design slots against: ${references}. Anything a model would emit by default is a 1, not a 2. When uncertain between 1 and 2 on a UI design slot, choose 1. (For non-UI adapters, ignore the references and calibrate per the ADAPTER RUBRIC's descriptors.)
-
-RUBRIC (1-3, primary + secondary are WEIGHTED x2): functionality, primary, secondary, craft — as defined in the ADAPTER RUBRIC above. Set pivot=true if primary OR secondary scores 1 (slop/weak foundation to discard, not patch). Append NEW findings to ${findingsPath} (keep existing). clean=false if ANY quality issue or held-out failure. Return passedCriteria, regressions, holdoutFailures, pivot, all four scores. ${SANDBOX}`,
-    { phase: 'Evaluate', label: `eval-B#${pass + 1}`, schema: VERDICT, model: 'opus' }
-  )
+  const [verdictA, verdictB] = await parallel([
+    () => agent(evalAStatic + evalDynamic, { phase: 'Evaluate', label: `eval-A#${pass + 1}`, schema: VERDICT, model: 'opus' }),
+    () => agent(evalBStatic + evalDynamic, { phase: 'Evaluate', label: `eval-B#${pass + 1}`, schema: VERDICT, model: 'opus' }),
+  ])
 
   // Merge: harsher score per slot.
   const scores = verdictA && verdictB ? {
@@ -459,16 +508,23 @@ RUBRIC (1-3, primary + secondary are WEIGHTED x2): functionality, primary, secon
         (regressions.length ? ` | REGRESSED: ${regressions.join(',')}` : '') +
         (holdoutFailures.length ? ` | HELD-OUT FAIL: ${holdoutFailures.join(',')}` : ''))
 
-    // CHECKPOINT — persist progress to disk so `status.sh` can render the live loop
-    // (state on disk, not context). Written via heredoc: zero quoting fragility, no
-    // Date() (banned in workflow scripts). Also doubles as resume state.
+    // CHECKPOINT — persist progress + findings to disk so `status.sh` can render the
+    // live loop and the fix agent has an evidence-rich work order (state on disk, not
+    // context). Written via heredocs: zero quoting fragility, no Date() (banned in
+    // workflow scripts). Also doubles as resume state. Single haiku call for both files.
     const progressJson = JSON.stringify({
       phase: 'evaluate', pass: pass + 1, maxPasses, clean: verdict.clean,
       adapter: adapterId, weightedAggregate: agg, scores: s, regressions, holdoutFailures,
       lockedCount: locked.size, pivotsUsed, needsHuman, scoreHistory,
     })
+    const findingsMd = [
+      `# Findings — pass ${pass + 1}/${maxPasses} (${verdict.clean ? 'clean' : `${verdict.issues || 0} open`})`,
+      (verdictA && verdictA.findings) ? `\n## Correctness (Pass A)\n${verdictA.findings}` : '',
+      (verdictB && verdictB.findings) ? `\n## Quality (Pass B)\n${verdictB.findings}` : '',
+      regressions.length ? `\n## Regressions (blocking — fix FIRST)\n${regressions.map(r => `- [ ] ${r} regressed — previously passed, must pass again`).join('\n')}` : '',
+    ].filter(Boolean).join('\n')
     await runScript(
-      `mkdir -p "${metaDir}" && cat > "${metaDir}/progress.json" <<'HARNESS_EOF'\n${progressJson}\nHARNESS_EOF\nprintf '## [evaluate pass %s] F%s P%s S%s Cr%s agg %s%s\\n' "${pass + 1}" "${s.functionality}" "${s.primary}" "${s.secondary}" "${s.craft}" "${agg}" "${verdict.clean ? ' | clean' : ''}" >> "${statePath}"`,
+      `mkdir -p "${metaDir}" && cat > "${metaDir}/progress.json" <<'HARNESS_EOF'\n${progressJson}\nHARNESS_EOF\ncat > "${findingsPath}" <<'HARNESS_FINDINGS_EOF'\n${findingsMd}\nHARNESS_FINDINGS_EOF\nprintf '## [evaluate pass %s] F%s P%s S%s Cr%s agg %s%s\\n' "${pass + 1}" "${s.functionality}" "${s.primary}" "${s.secondary}" "${s.craft}" "${agg}" "${verdict.clean ? ' | clean' : ''}" >> "${statePath}"`,
       `checkpoint#${pass + 1}`, 'Evaluate'
     )
 
@@ -514,11 +570,15 @@ RUBRIC (1-3, primary + secondary are WEIGHTED x2): functionality, primary, secon
 Do NOT carry over the old approach. IF the app has a UI: choose a fresh, non-default design direction — avoid every slop tell (purple/indigo gradients, gradient text, centered hero + 3 cards, default shadcn cards, Inter/Geist-only type, cream+serif+sage, emoji icons, neon glow, "Transform your X" copy) and calibrate to: ${references}. IF the app has NO UI: rebuild with genuinely stronger ergonomics/robustness — real error handling, proper output, no placeholders/TODOs/stubs. Commit. The app must build/run. Append "phase=pivot ${pivotsUsed}" to ${statePath}. ${SANDBOX} Return the run command.`,
       { phase: 'Evaluate', label: `pivot#${pivotsUsed}`, model: 'sonnet' }
     )
-    // Re-gate the fresh build (deterministic) before the next evaluation pass. Unlike the
+    // Re-gate the fresh build (deterministic) before the next evaluation pass. The shared
+    // server (if any) is stopped first — it was serving the DISCARDED build; leaving it up
+    // would let the next pass's boot health-check "reuse" a stale instance. Unlike the
     // initial Gate phase, a pivot restart gets no dedicated fix-loop retries — if the fresh
     // build still can't gate, stop here rather than burning an Evaluate pass's opus calls on
     // a build that doesn't even boot (same rationale as the initial-gate bail-out above).
-    gate = await runScript(gateScript(workdir), `gate-pivot#${pivotsUsed}`, 'Evaluate', GATE)
+    gate = await runScript(
+      `bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1; ${gateScript(workdir)}`,
+      `gate-pivot#${pivotsUsed}`, 'Evaluate', GATE)
     if (gate && !gate.passed) {
       needsHuman = true
       log(`stopping: post-pivot gate failed — ${gate.summary}`)
@@ -527,18 +587,52 @@ Do NOT carry over the old approach. IF the app has a UI: choose a fresh, non-def
     continue
   }
 
-  // FIX: generator patches findings. Errors are written for it (findings.md + the
-  // failing-criteria ids), never raw tool spew.
+  // FIX: generator patches findings. Errors are written for it (findings.md carries
+  // EXPECTED/ACTUAL/REPRO/FIX per finding), never raw tool spew. Every fix must be
+  // PROVEN live by re-running the finding's own repro before the generator returns.
   await agent(
-    `You are the GENERATOR. Read ${findingsPath} and ${specPath} (NOT ${metaDir}). Fix EVERY open issue. Prioritise: (1) regressions — criteria that USED to work and broke: ${regressions.length ? regressions.join(', ') : 'none'}; (2) slots scoring 1-2 (primary + secondary matter most, weighted x2). Eliminate weakness: replace placeholders with real content/output, add empty/error/loading states and real error handling, handle edge inputs, fix dead surfaces, and — for UI apps — raise the design bar toward ${references}. Commit. Do NOT regress any criterion that currently passes. Append "phase=fix pass=${pass + 1}" to ${statePath}. ${SANDBOX} Return "done" plus the run command.`,
+    `You are the GENERATOR. Read ${findingsPath} and ${specPath} (NOT ${metaDir}). Fix EVERY open finding at its root cause, then PROVE each fix: re-run the app and walk the finding's REPRO steps yourself — a fix is done only when you have observed the EXPECTED behavior live, not when the code "should" work. Prioritise: (1) regressions — criteria that USED to work and broke: ${regressions.length ? regressions.join(', ') : 'none'}; (2) findings behind slots scoring 1-2 (primary + secondary matter most, weighted x2). Eliminate weakness: replace placeholders with real content/output, add empty/error/loading states and real error handling, handle edge inputs, fix dead surfaces, and — for UI apps — raise the design bar toward ${references}. Commit. Do NOT regress any criterion that currently passes. Stop any server you started. Append "phase=fix pass=${pass + 1}" to ${statePath}. ${SANDBOX} Return "done" plus the run command.`,
     { phase: 'Evaluate', label: `fix#${pass + 1}`, model: 'sonnet' }
   )
+
+  // POST-FIX GATE — a fix that breaks the build must be caught NOW by the deterministic
+  // gate (near-zero LLM cost), not discovered by the next pass's two opus evaluators.
+  // Wrong fix -> one targeted repair -> re-gate; still broken -> stop and escalate.
+  // The `run stop` prefix also retires the shared dev server, so the next pass's boot
+  // starts fresh code (dependency changes survive; no stale hot-reload state).
+  let postGate = await runScript(
+    `bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1; ${gateScript(workdir)}`,
+    `gate-postfix#${pass + 1}`, 'Evaluate', GATE)
+  if (postGate && !postGate.passed && !budgetLow()) {
+    const failed = (postGate.checks || []).filter(c => c.status === 'fail')
+      .map(c => `${c.name}: ${c.detail}`).join(' | ')
+    log(`post-fix gate fail (${postGate.blocking}): ${postGate.summary} — repairing before next eval`)
+    await agent(
+      `You are the GENERATOR. Your last fix pass BROKE the deterministic machine gate. Failing checks (name: first error line):
+${failed || '(no detail captured — reproduce by running the project\'s install/build/typecheck/lint/test and starting it)'}
+
+Repair ONLY what makes these gate checks fail — do NOT add features, do NOT undo the finding fixes you just made unless one of them is the direct cause, and do NOT read ${metaDir} (off-limits). Commit. ${SANDBOX} Return the run command.`,
+      { phase: 'Evaluate', label: `gate-postfix-repair#${pass + 1}`, model: 'sonnet' }
+    )
+    postGate = await runScript(gateScript(workdir), `gate-postfix-re#${pass + 1}`, 'Evaluate', GATE)
+  }
+  if (postGate) gate = postGate
+  if (postGate && !postGate.passed) {
+    needsHuman = true
+    log(`stopping: build still fails the gate after the post-fix repair — ${postGate.summary}`)
+    break
+  }
 }
 
 // ---- Live Preview : deterministic capture of every surface -------------------
+// perf: when the app source is byte-identical to the last verify scan (same cksum
+// signature as the change-detection guard in prep), the screenshots/captured outputs
+// in probe.json already ARE the preview — derive preview.json from it instead of
+// paying a full second boot+crawl cycle. Any post-verify fix/pivot changes the hash
+// and forces a real preview run. Always retires the shared dev server afterwards.
 phase('Preview')
 const previewOut = await runScript(
-  `bash "${scriptsDir}/harness.sh" preview "${workdir}" --surfaces "${surfaces.join(',')}"`,
+  `sig=$(find "${appPath}" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' -exec cksum {} + 2>/dev/null | sort | cksum | cut -d' ' -f1); prev=$(cat "${metaDir}/.prep-sig" 2>/dev/null || printf none); out=""; if [ "$sig" = "$prev" ] && [ -f "${metaDir}/probe.json" ]; then out=$(jq -c --arg wd "${workdir}" '{screenshots:[.surfaces[]? | (.artifact // "") | select(length>0) | if startswith("/") then . else ($wd + "/" + .) end], baseUrl:(.baseUrl // "")}' "${metaDir}/probe.json" 2>/dev/null); [ -n "$out" ] && printf '%s' "$out" > "${metaDir}/preview.json"; fi; if [ -z "$out" ]; then out=$(bash "${scriptsDir}/harness.sh" preview "${workdir}" --surfaces "${surfaces.join(',')}"); fi; bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1 || true; printf '%s\\n' "$out"`,
   'preview', 'Preview'
 )
 let screenshots = []

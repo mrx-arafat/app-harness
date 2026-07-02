@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-07-02 — Production-grade Evaluate→Fix→Re-evaluate loop (web-focused)
+
+### Changed
+- **One shared server boot per pass** (web): the workflow boots (or reuses a still-healthy)
+  dev server before the pre-compute step; `verify.sh` now detects a live
+  `server.pid`/`server.port` instance, probes it instead of booting its own, and leaves it
+  running (it only stops what it starts). Both evaluators drive the same instance via
+  separate browser sessions (`harness-a`/`harness-b`). Was 3 boot/teardown cycles per pass,
+  now 1.
+- **Pass A + Pass B run in parallel.** Evaluators no longer write any files — each returns
+  its findings in the structured verdict (`VERDICT.findings`, required), and the workflow
+  merges both into `findings.md` inside the existing checkpoint call (one haiku call writes
+  progress.json + findings.md + state.md). Kills the A-overwrites/B-appends file race and
+  halves Evaluate-pass wall-clock. The old skip-B-on-pivot shortcut is gone (B launches
+  before A's verdict exists); Pass B now spot-checks only the 2–3 most gameable held-out
+  checks instead of re-sweeping all of them (Pass A owns the full sweep).
+- **Evidence-rich findings format**: every failing item is
+  `- [ ] <id> <surface>: EXPECTED … | ACTUAL … | REPRO … | FIX …`. The fix agent must
+  re-run each finding's REPRO live and observe the EXPECTED behavior before returning; the
+  next Pass A re-verifies each previously-open finding first and records failed fixes
+  explicitly.
+- **Post-fix machine gate**: after every fix pass the deterministic gate re-runs (and
+  retires the shared server so the next pass boots fresh code). A fix that breaks the build
+  gets one targeted sonnet repair + re-gate; still failing → stop with `needsHuman=true`
+  instead of spending two opus evaluators on a build that no longer compiles. Pivot re-gate
+  likewise stops the stale server first (prevents the next boot from "reusing" a server
+  that serves the discarded build).
+- **Preview reuse**: when the app source is byte-identical to the last verify scan
+  (`.prep-sig` cksum guard), the Preview phase derives `preview.json` directly from
+  `probe.json` instead of paying a second boot+crawl; falls back to a real
+  `harness.sh preview` whenever the hash changed.
+- **Selector skip** (best-of-N): when exactly one candidate gate-passes, the winner is
+  promoted deterministically — the opus Selector only runs for genuine ties or all-fail.
+- **Cache-stable evaluator prompts**: static blocks (role, adapter rubric, references,
+  sandbox clause) are built once and byte-identical every pass; per-pass dynamic context
+  (regression lock, live server URL) is appended at the end.
+- **Condition-based settle in web `verify.sh`**: `waitForLoadState("networkidle")` (4s cap)
+  replaces the fixed 2s sleep per surface — faster on quick pages, more reliable on slow
+  ones.
+- `PREP` schema slimmed to `{surfaces}` (the hardcoded `slopTotal`/`consoleErrors`/
+  `blankScreens` placeholders were dead).
+
 ## 2026-07-01 — Generalized to app-harness (any app type)
 
 Renamed `web-app-harness` → `app-harness`. The harness now builds any app type — web,

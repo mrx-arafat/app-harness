@@ -23,7 +23,7 @@ Human ──prompt──> Planner ──spec.md + holdout.md──> Generator �
 | **Planner** | human brief | `spec.md`, `.harness/holdout.md`, `.harness/adapter.json`, `.harness/state.md` | once |
 | **Generator** | `spec.md`, `findings.md` (NEVER `.harness/`) | `app/` + git | one build, then on each fix or pivot |
 | **Gate** | live `app/` | `.harness/gate.md` | after each generate/fix, up to 2 repair attempts |
-| **Evaluator** | live artifact, `spec.md`, `.harness/holdout.md` | `findings.md` | two passes per loop iteration (A: correctness, B: adversarial quality) |
+| **Evaluator** | live artifact, `spec.md`, `.harness/holdout.md` | structured verdict (the workflow merges both verdicts' findings into `findings.md`) | two passes per loop iteration, run in PARALLEL (A: correctness, B: adversarial quality) |
 
 No context resets, no sprint decomposition. The spec file and the gate result are the only contracts.
 
@@ -177,7 +177,9 @@ The gate is **`adapters/<id>/gate.sh`**, invoked through the dispatcher (`harnes
 
 Before each evaluation, deterministic scripts pre-compute the machine-observable facts and write them to `.harness/`: `extract-criteria.mjs` → `criteria.json` (AC/HC ids + surfaces), `harness.sh quality` → `slop.json` (weighted quality/slop hits), and `harness.sh verify` → `probe.json` (per-surface status: HTTP status/console errors/blank screens for UI adapters, or exit codes/captured output for CLI/service adapters). The Evaluator **reads these artifacts** instead of re-deriving them live — it spends its (Opus) tokens on judgment and targeted interaction, not on crawling routes, re-running commands, or grepping for slop signatures. This keeps the evaluator's context clean and cuts live-interaction calls sharply.
 
-The Evaluator runs two passes per loop iteration:
+For server-backed adapters (web), the harness boots **one shared server instance per pass** — reused (if still healthy) or started before the pre-compute step. `verify.sh` detects and probes that instance instead of booting its own, and both evaluator passes drive it through separate browser sessions (`harness-a` / `harness-b`). What used to be three boot/teardown cycles per pass (verify + eval-A + eval-B) is now one.
+
+The Evaluator runs two passes per loop iteration — **in parallel**, since they are independent judges and neither writes to disk (each returns its findings in the structured verdict; the workflow merges them into `findings.md` in the checkpoint step, eliminating the old file race):
 
 **Pass A — Correctness:** Exercise the live artifact using the adapter's verify method — playwright-cli for web/extension/mobile/desktop (session-isolated: `-s="${PILOT_SESSION_ID:-harness}"`), direct invocation with captured stdout/stderr/exit code for `cli`, an API/tool call for `ai-service`, the configured verify command for `generic`. Check every acceptance criterion in `spec.md` AND every held-out check in `.harness/holdout.md`. Apply the regression lock (see below). Write failing items to `findings.md`.
 
@@ -188,6 +190,10 @@ For **UI adapters**, Pass B also runs **`playwright-cli screenshot`** on each ma
 **Resilient evaluation:** When a live-interaction action fails (element not found, button unresponsive, navigation doesn't trigger, a CLI invocation times out, an API call errors transiently), the Evaluator does NOT immediately record FAIL. It retries with a corrective step — reload, wait for element, alternate selector, re-invoke, or re-call. Only if the retry also fails is FAIL recorded. This prevents false negatives from transient timing issues and async renders.
 
 The harness merges the two verdicts by taking the **harsher score per slot**. The loop exits only when `clean=true` AND all four rubric slots are ≥ 2.
+
+**Evidence-rich findings.** Every failing item lands in `findings.md` in a fixed forensic format — `- [ ] <id> <surface>: EXPECTED <spec behavior> | ACTUAL <observed> | REPRO <minimal steps> | FIX <file hint>` — so the fix agent gets a work order, not a vibe. The fix agent must then **prove each fix live**: re-run the app and walk the finding's own REPRO steps before returning.
+
+**Post-fix gate (fix-verification).** After every fix pass, the deterministic machine gate re-runs (near-zero LLM cost) before the next expensive evaluation: a fix that broke the build gets one targeted repair and a re-gate; if it still fails, the loop stops with `needsHuman=true` instead of burning two Opus evaluator calls on a build that no longer compiles. The next evaluation pass additionally re-verifies every item the fix claimed to resolve — a finding that reappears is recorded as a failed fix and goes back to re-implementation. The re-gate also retires the pass's shared dev server, so the next pass boots fresh code (dependency changes survive).
 
 ## Slop Detection
 
@@ -305,7 +311,7 @@ The script returns:
 
 ### Live Preview (MANDATORY — always show this)
 
-**Immediately after the workflow returns, show the user the working artifact.** Do this before reporting anything else. The workflow's own Preview phase has ALREADY booted the artifact, exercised every surface, and written the result to `screenshots` (paths) and `.harness/probe.json` (per-surface detail) — **do not re-boot the app, re-open a browser, or re-run the invocations yourself.** That would be a second full boot/exercise cycle on top of one the workflow just paid for; read what's already on disk instead.
+**Immediately after the workflow returns, show the user the working artifact.** Do this before reporting anything else. The workflow's own Preview phase has ALREADY booted the artifact, exercised every surface, and written the result to `screenshots` (paths) and `.harness/probe.json` (per-surface detail) — when the source is unchanged since the last verify scan, it derives the preview straight from `probe.json` without even a re-boot. **Do not re-boot the app, re-open a browser, or re-run the invocations yourself.** That would be a second full boot/exercise cycle on top of one the workflow just paid for; read what's already on disk instead.
 
 ```bash
 # Read what the workflow already produced — no new boot, no new browser session, no re-run.

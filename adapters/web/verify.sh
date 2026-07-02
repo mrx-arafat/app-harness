@@ -133,15 +133,18 @@ fi
 # Cleanup — always runs (server stop + browser close), even on error/interrupt
 # ---------------------------------------------------------------------------
 BOOT_PID=""
+EXTERNAL_SERVER=0
 cleanup() {
   # 1) close the browser session (best effort)
   playwright-cli -s="$S" close >/dev/null 2>&1 || true
-  # 2) stop the server via run.sh (idempotent per its contract)
-  if [ -x "$SCRIPT_DIR/run.sh" ]; then
+  # 2) stop the server via run.sh (idempotent per its contract) — but only a server
+  #    THIS script booted. An externally-booted instance (harness boot-once-per-pass)
+  #    outlives us so the evaluators can keep driving it.
+  if [ "$EXTERNAL_SERVER" -eq 0 ] && [ -x "$SCRIPT_DIR/run.sh" ]; then
     "$SCRIPT_DIR/run.sh" stop "$APPDIR_ABS" >>"$VERIFY_LOG" 2>&1 || true
   fi
   # 3) safety net: if the booted pid is somehow still alive, take it + children down
-  if [ -n "${BOOT_PID:-}" ] && kill -0 "$BOOT_PID" 2>/dev/null; then
+  if [ "$EXTERNAL_SERVER" -eq 0 ] && [ -n "${BOOT_PID:-}" ] && kill -0 "$BOOT_PID" 2>/dev/null; then
     pkill -P "$BOOT_PID" >/dev/null 2>&1 || true
     kill "$BOOT_PID" >/dev/null 2>&1 || true
   fi
@@ -245,23 +248,37 @@ if [ ! -x "$SCRIPT_DIR/run.sh" ]; then
   emit_and_exit "" 1
 fi
 
-log "booting app: $APPDIR_ABS"
-BOOT_OUT="$("$SCRIPT_DIR/run.sh" start "$APPDIR_ABS" 2>>"$VERIFY_LOG")"
-READY_LINE="$(printf '%s\n' "$BOOT_OUT" | grep '^READY ' | head -1)"
+# Reuse an already-running server (harness boot-once-per-pass): if server.pid/port
+# point at a live process that answers HTTP, probe THAT instance instead of booting
+# a second copy — and leave it running on exit (we only stop what we start).
+_ext_pid="$(cat "$HARNESS_DIR/server.pid" 2>/dev/null)" || _ext_pid=""
+_ext_port="$(cat "$HARNESS_DIR/server.port" 2>/dev/null)" || _ext_port=""
+if [ -n "$_ext_pid" ] && [ -n "$_ext_port" ] && kill -0 "$_ext_pid" 2>/dev/null \
+   && curl -s -o /dev/null --max-time 3 "http://127.0.0.1:${_ext_port}/" 2>/dev/null; then
+  EXTERNAL_SERVER=1
+  BOOT_PORT="$_ext_port"
+  BOOT_PID=""
+  BASE_URL="http://127.0.0.1:${_ext_port}"
+  log "reusing already-running server: base=$BASE_URL pid=$_ext_pid (will NOT stop it)"
+else
+  log "booting app: $APPDIR_ABS"
+  BOOT_OUT="$("$SCRIPT_DIR/run.sh" start "$APPDIR_ABS" 2>>"$VERIFY_LOG")"
+  READY_LINE="$(printf '%s\n' "$BOOT_OUT" | grep '^READY ' | head -1)"
 
-if [ -z "$READY_LINE" ]; then
-  log "ERROR: run.sh did not report READY. Output: $BOOT_OUT"
-  emit_and_exit "" 1
-fi
+  if [ -z "$READY_LINE" ]; then
+    log "ERROR: run.sh did not report READY. Output: $BOOT_OUT"
+    emit_and_exit "" 1
+  fi
 
-BOOT_PORT="$(printf '%s\n' "$READY_LINE" | awk '{print $2}')"
-BOOT_PID="$(printf '%s\n' "$READY_LINE" | awk '{print $3}')"
-BASE_URL="$(printf '%s\n' "$READY_LINE" | awk '{print $4}')"
-BASE_URL="${BASE_URL%/}"   # normalize: no trailing slash
-if [ -z "$BASE_URL" ]; then
-  BASE_URL="http://127.0.0.1:${BOOT_PORT}"
+  BOOT_PORT="$(printf '%s\n' "$READY_LINE" | awk '{print $2}')"
+  BOOT_PID="$(printf '%s\n' "$READY_LINE" | awk '{print $3}')"
+  BASE_URL="$(printf '%s\n' "$READY_LINE" | awk '{print $4}')"
+  BASE_URL="${BASE_URL%/}"   # normalize: no trailing slash
+  if [ -z "$BASE_URL" ]; then
+    BASE_URL="http://127.0.0.1:${BOOT_PORT}"
+  fi
+  log "ready: base=$BASE_URL port=$BOOT_PORT pid=$BOOT_PID"
 fi
-log "ready: base=$BASE_URL port=$BOOT_PORT pid=$BOOT_PID"
 
 # ---------------------------------------------------------------------------
 # Open the browser once, then visit each surface
@@ -306,8 +323,11 @@ for SURFACE in $SURFACE_LIST; do
     log "goto failed for $SURFACE after retry"
   fi
 
-  # Give the app a moment to render / emit runtime errors.
-  sleep 2
+  # Condition-based settle: wait for network idle (up to 4s) instead of the old
+  # fixed 2s sleep — faster on quick pages, more reliable on slow ones. Falls
+  # through harmlessly if run-code is unavailable; the short sleep covers paint.
+  playwright-cli -s="$S" run-code 'async page => { try { await page.waitForLoadState("networkidle", { timeout: 4000 }); } catch (e) {} }' >>"$VERIFY_LOG" 2>&1 || true
+  sleep 0.3
 
   # ---- HTTP status (playwright has none; use curl) ----
   STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$FULL_URL" 2>/dev/null)"
