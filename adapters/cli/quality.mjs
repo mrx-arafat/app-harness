@@ -234,4 +234,4 @@ const obj = { total: hits.length, byKind, hits };
 const json = JSON.stringify(obj);
 process.stdout.write(json + "\n");
 if (OUT) { try { fs.writeFileSync(OUT, json + "\n"); } catch { } }
-process.exit(0);
+process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON

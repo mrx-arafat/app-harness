@@ -199,6 +199,12 @@ function extractWebRoutes(content) {
     if (normalized.length > 1) routeSet.add(normalized);
   }
 
+  // Bare root route: the token regex above requires a first segment, so a spec
+  // listing the landing page as "- `/` — home" (or "/" quoted) silently loses
+  // it — the single most important surface of a web app. Detect a root mention
+  // as a quoted/backticked "/" or a list item consisting of "/".
+  if (/["'`]\/["'`]|^[-*+]\s+\/(?:\s|$)/m.test(noUrls)) routeSet.add('/');
+
   return routeSet;
 }
 
@@ -347,13 +353,26 @@ function extractSurfaces(content) {
     if (sp >= 0) endpointPaths.add(e.slice(sp + 1));
   }
 
+  let webRouteCount = 0;
   for (const s of extractWebRoutes(content)) {
-    if (!endpointPaths.has(s)) combined.add(s);
+    if (!endpointPaths.has(s)) {
+      combined.add(s);
+      webRouteCount++;
+    }
   }
   for (const s of extractCliInvocations(content)) combined.add(s);
   for (const s of endpoints) combined.add(s);
-  for (const s of extractScreenNames(content)) combined.add(s);
+  // Screen/page names are surfaces only for screen-based artifacts (mobile,
+  // desktop, extension). When the spec already yields URL routes, prose like
+  // "Landing page renders..." would otherwise be probed as a literal
+  // "/Landing page" URL — a guaranteed 404/false blank. Routes win.
+  if (webRouteCount === 0) {
+    for (const s of extractScreenNames(content)) combined.add(s);
+  }
   for (const s of extractToolNames(content)) combined.add(s);
+  // A web app always serves its root — make sure "/" is probed whenever the
+  // spec is web-shaped and yielded real routes.
+  if (webRouteCount > 0 && looksWebish(content)) combined.add('/');
 
   if (combined.size === 0 && looksWebish(content)) {
     combined.add('/');
@@ -370,7 +389,7 @@ const specContent = readFileSafe(specPath);
 if (!specContent) {
   const empty = { acceptance: [], holdout: [], surfaces: ['/'], routes: ['/'] };
   process.stdout.write(JSON.stringify(empty, null, 2) + '\n');
-  process.exit(0);
+  process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
 }
 
 const acceptance = parseCriteria(specContent, 'AC');
@@ -400,4 +419,4 @@ try {
   process.stderr.write(`Warning: cannot write to ${outPath}: ${e.message}\n`);
 }
 
-process.exit(0);
+process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON

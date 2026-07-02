@@ -218,4 +218,4 @@ try {
 }
 
 process.stdout.write(json + '\n');
-process.exit(0);
+process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON

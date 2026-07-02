@@ -247,7 +247,7 @@ async function main() {
     process.stderr.write('Usage: node quality.mjs <appdir> [--out <json>]\n');
     // still emit an empty-but-valid result so callers never choke
     process.stdout.write(JSON.stringify({ total: 0, byKind: {}, hits: [] }) + '\n');
-    process.exit(0);
+    process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
   }
 
   const appDir = resolve(args[0]);
@@ -293,12 +293,12 @@ async function main() {
   } catch (err) {
     process.stderr.write(`quality.mjs: could not write ${outPath}: ${err.message}\n`);
   }
-  process.exit(0);
+  process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
 }
 
 main().catch((err) => {
   // Never crash a caller — emit valid JSON on any unexpected failure.
   process.stderr.write(`quality.mjs: ${err && err.message ? err.message : err}\n`);
   process.stdout.write(JSON.stringify({ total: 0, byKind: {}, hits: [] }) + '\n');
-  process.exit(0);
+  process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
 });

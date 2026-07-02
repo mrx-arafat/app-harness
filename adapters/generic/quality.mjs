@@ -36,7 +36,7 @@ async function main() {
   if (!rawAppDir) {
     process.stderr.write('Usage: quality.mjs <appdir> [--out <json>]\n');
     process.stdout.write(JSON.stringify(empty) + '\n');
-    process.exit(0);
+    process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
   }
 
   const appDir = resolve(rawAppDir);
@@ -70,7 +70,7 @@ async function main() {
   }
 
   process.stdout.write(JSON.stringify(result) + '\n');
-  process.exit(0);
+  process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
 }
 
 main();

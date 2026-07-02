@@ -395,7 +395,11 @@ async function main() {
   } catch (err) {
     process.stderr.write(`Warning: could not write ${outPath}: ${err.message}\n`);
   }
-  process.exit(0);
+  // No process.exit(): on a pipe, exit() drops any stdout bytes past the 64KB
+  // buffer — a real-world scan (hundreds of hits) truncates mid-JSON and the
+  // dispatcher's json_valid falls back to {"total":0}, silently blinding the
+  // slop gate. Let Node flush and exit on its own.
+  process.exitCode = 0;
 }
 
 main();

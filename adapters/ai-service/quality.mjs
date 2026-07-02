@@ -216,4 +216,4 @@ process.stdout.write(json + "\n");
 if (outFile) {
   try { (await import("node:fs")).writeFileSync(outFile, json + "\n"); } catch {}
 }
-process.exit(0);
+process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON

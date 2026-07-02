@@ -340,7 +340,7 @@ async function main() {
   } catch (err) {
     process.stderr.write(`Warning: could not write ${outPath}: ${err.message}\n`);
   }
-  process.exit(0);
+  process.exitCode = 0; // no exit(): would truncate large piped stdout mid-JSON
 }
 
 main();

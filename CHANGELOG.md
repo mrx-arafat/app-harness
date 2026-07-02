@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-07-02 — Real-world bench fixes (found by running the skill against a live Next.js app)
+
+### Fixed
+- **Slop scan silently reported 0 on real apps**: every `quality.mjs` (and
+  `extract-criteria.mjs`) called `process.exit(0)` right after writing large JSON to
+  stdout — on a pipe, exit() drops everything past the 64KB buffer, the truncated JSON
+  failed `json_valid`, and the dispatcher fell back to `{"total":0}`. Fixture-sized
+  outputs fit the buffer, so the self-test suite never caught it. All adapters now use
+  `process.exitCode = 0` and let Node flush. (Bench: 375 real hits were reported as 0.)
+- **Root route `/` never extracted**: the route regex requires a first path segment, so
+  a spec listing "- `/` — landing page" lost the app's most important surface. Bare
+  root mentions (quoted/backticked "/" or a "- /" list item) are now detected, and any
+  web-shaped spec with real routes always includes "/".
+- **Prose screen-names polluted web surfaces**: "Landing page renders…" produced a
+  literal "Landing page" surface that verify probes as `/Landing page` — a guaranteed
+  false blank. Screen-name extraction now applies only when a spec yields no URL routes
+  (mobile/desktop/extension specs).
+
 ## 2026-07-02 — Production-grade Evaluate→Fix→Re-evaluate loop (web-focused)
 
 ### Changed
