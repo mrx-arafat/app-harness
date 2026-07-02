@@ -409,6 +409,76 @@ await scenario('S10', async () => {
   ok(result.adapter === 'unresolved', 'S10 feature-guard: adapter=unresolved')
 })
 
+// ===========================================================================
+// S11 — flap detection (criterion churns fail -> pass -> fail across passes)
+// ===========================================================================
+await scenario('S11', async () => {
+  const { result, logs } = await runWorkflow({
+    args: { maxPasses: 3 },
+    evalHandler: (label) => {
+      const n = passNum(label)
+      if (n === 1) {
+        // AC1 failing (findings line carries the id).
+        return verdict({
+          clean: false, issues: 1, scores: sc(2, 2, 2, 2),
+          findings: '- [ ] AC1 /home: EXPECTED shows list | ACTUAL blank | REPRO open / | FIX Home.tsx',
+        })
+      }
+      if (n === 2) {
+        // AC1 "fixed" (passed with evidence), some other issue keeps the loop going.
+        return verdict({
+          clean: false, issues: 2, scores: sc(2, 2, 2, 2),
+          passedCriteria: ['AC1'],
+          evidence: [{ id: 'AC1', proof: 'saw the list render' }],
+        })
+      }
+      // pass 3: AC1 broke AGAIN — the fix did not hold.
+      return verdict({
+        clean: false, issues: 3, scores: sc(2, 2, 2, 2),
+        regressions: ['AC1'],
+      })
+    },
+  })
+  ok(
+    Array.isArray(result.flapping) && result.flapping.some((f) => f.startsWith('AC1 (')),
+    'S11 flap: AC1 reported in result.flapping'
+  )
+  ok(
+    result.flapping.some((f) => f === 'AC1 (F->P->F)'),
+    'S11 flap: state trail is F->P->F'
+  )
+  ok(logHas(logs, 'flap detection'), 'S11 flap: log line contains "flap detection"')
+})
+
+// ===========================================================================
+// S12 — no false flaps (a criterion fixed once and holding is NOT flapping)
+// ===========================================================================
+await scenario('S12', async () => {
+  const { result } = await runWorkflow({
+    args: { maxPasses: 2 },
+    evalHandler: (label) => {
+      const n = passNum(label)
+      if (n === 1) {
+        return verdict({
+          clean: false, issues: 1, scores: sc(2, 2, 2, 2),
+          findings: '- [ ] AC1 /home: EXPECTED shows list | ACTUAL blank | REPRO open / | FIX Home.tsx',
+        })
+      }
+      // pass 2: fixed and clean — one transition (F->P), not a flap.
+      return verdict({
+        clean: true, scores: sc(3, 3, 3, 3),
+        passedCriteria: ['AC1'],
+        evidence: [{ id: 'AC1', proof: 'saw the list render' }],
+      })
+    },
+  })
+  ok(result.clean === true, 'S12 no-false-flap: run ends clean')
+  ok(
+    Array.isArray(result.flapping) && result.flapping.length === 0,
+    'S12 no-false-flap: single F->P transition is not reported as flapping'
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------

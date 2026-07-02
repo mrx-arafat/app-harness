@@ -517,6 +517,11 @@ phase('Evaluate')
 let lastVerdict = null
 let locked = new Set()
 const scoreHistory = []
+// Per-pass criterion status (episodic timeline): which ids passed vs failed each
+// pass. Feeds deterministic FLAP detection in the final report — an id that goes
+// fail -> pass -> fail (or the reverse) means the fix loop is trading breakage
+// back and forth, the classic sign of a fix that "worked" without holding.
+const criteriaTimeline = []
 let stalls = 0
 let noProgress = 0
 let lastSignature = null
@@ -703,8 +708,18 @@ DYNAMIC CONTEXT — pass ${pass + 1}/${maxPasses}:
   } : (verdictA || verdictB)
 
   lastVerdict = verdict
-  // NOTE: locking moved below the checkpoint — a criterion is locked only when its
-  // PASS is backed by evidence (and any claimed proof file actually exists on disk).
+  // Record this pass's criterion states for flap detection. Failing ids come from
+  // the findings lines ("- [ ] <id> ..."), regressions, and held-out failures;
+  // an id both claimed passed and found failing counts as FAILING (harsher wins).
+  {
+    const failedIds = new Set([...regressions, ...holdoutFailures])
+    const findingsText = `${verdictA?.findings || ''}\n${verdictB?.findings || ''}`
+    let fm
+    const findingIdRe = /^- \[ \] ([A-Za-z]+\d+)\b/gm
+    while ((fm = findingIdRe.exec(findingsText)) !== null) failedIds.add(fm[1])
+    const passedIds = new Set(passedCriteriaThisPass.filter(id => !failedIds.has(id)))
+    criteriaTimeline.push({ passed: passedIds, failed: failedIds })
+  }
 
   if (verdict && verdict.scores) {
     const s = verdict.scores
@@ -744,8 +759,13 @@ DYNAMIC CONTEXT — pass ${pass + 1}/${maxPasses}:
     const proofCheck = proofPaths.length
       ? `missing=$( { for f in ${proofPaths.map(p => `"${p}"`).join(' ')}; do [ -e "$f" ] || printf '%s\\n' "$f"; done; } | jq -R . | jq -s -c '.')`
       : `missing='[]'`
+    // findings.md is OVERWRITTEN each pass (it's the fix agent's work order), so the
+    // run's episodic history — what failed, what a fix claimed, what re-failed — is
+    // also APPENDED to findings-history.md. That append-only log is the diagnosis
+    // trail for flapping criteria and post-mortems; it costs nothing (same call,
+    // reuses the file just written).
     const checkpt = await runScript(
-      `mkdir -p "${metaDir}" && cat > "${metaDir}/progress.json" <<'HARNESS_EOF'\n${progressJson}\nHARNESS_EOF\ncat > "${findingsPath}" <<'HARNESS_FINDINGS_EOF'\n${findingsMd}\nHARNESS_FINDINGS_EOF\nprintf '## [evaluate pass %s] F%s P%s S%s Cr%s agg %s%s\\n' "${pass + 1}" "${s.functionality}" "${s.primary}" "${s.secondary}" "${s.craft}" "${agg}" "${verdict.clean ? ' | clean' : ''}" >> "${statePath}"\n${proofCheck}\njq -n --argjson m "$missing" '{missing:$m}'`,
+      `mkdir -p "${metaDir}" && cat > "${metaDir}/progress.json" <<'HARNESS_EOF'\n${progressJson}\nHARNESS_EOF\ncat > "${findingsPath}" <<'HARNESS_FINDINGS_EOF'\n${findingsMd}\nHARNESS_FINDINGS_EOF\ncat "${findingsPath}" >> "${metaDir}/findings-history.md" && printf '\\n---\\n' >> "${metaDir}/findings-history.md"\nprintf '## [evaluate pass %s] F%s P%s S%s Cr%s agg %s%s\\n' "${pass + 1}" "${s.functionality}" "${s.primary}" "${s.secondary}" "${s.craft}" "${agg}" "${verdict.clean ? ' | clean' : ''}" >> "${statePath}"\n${proofCheck}\njq -n --argjson m "$missing" '{missing:$m}'`,
       `checkpoint#${pass + 1}`, 'Evaluate', CHECKPT
     )
 
@@ -882,6 +902,23 @@ try {
 } catch { screenshots = [] }
 log(`live preview complete — ${screenshots.length} artifact(s)`)
 
+// ---- FLAP DETECTION (deterministic, from the per-pass criterion timeline) ------
+// A criterion "flaps" when its pass/fail state changes 2+ times across passes
+// (fail -> pass -> fail, or pass -> fail -> pass): the fix loop is churning it,
+// not fixing it. Pure JS over recorded states — no agents, no re-reads.
+const flapById = new Map()
+for (const entry of criteriaTimeline) {
+  for (const id of entry.passed) { if (!flapById.has(id)) flapById.set(id, []); flapById.get(id).push('P') }
+  for (const id of entry.failed) { if (!flapById.has(id)) flapById.set(id, []); flapById.get(id).push('F') }
+}
+const flapping = []
+for (const [id, states] of flapById) {
+  let transitions = 0
+  for (let i = 1; i < states.length; i++) { if (states[i] !== states[i - 1]) transitions++ }
+  if (transitions >= 2) flapping.push(`${id} (${states.join('->')})`)
+}
+if (flapping.length) log(`flap detection: ${flapping.length} criteria churned across passes — ${flapping.join(', ')}`)
+
 // ---- Final REPORT.md : one human-readable run summary (deterministic write) ----
 const fs2 = lastVerdict && lastVerdict.scores ? lastVerdict.scores : null
 const reportPath = `${workdir}/REPORT.md`
@@ -900,6 +937,7 @@ const reportMd = [
   `| score curve (6-18) | ${scoreHistory.join(' -> ') || 'n/a'} |`,
   fs2 ? `| final scores | functionality ${fs2.functionality} / primary ${fs2.primary} / secondary ${fs2.secondary} / craft ${fs2.craft} |` : `| final scores | n/a |`,
   `| locked criteria | ${locked.size ? [...locked].join(', ') : 'none'} |`,
+  `| flapping criteria | ${flapping.length ? flapping.join(', ') + ' — churned by the fix loop, verify these by hand' : 'none'} |`,
   `| tokens spent | ${budget.spent()} |`,
   ``,
   `## Verdict`,
@@ -908,7 +946,7 @@ const reportMd = [
   `## Artifacts`,
   screenshots.length ? screenshots.map(p => `- ${p}`).join('\n') : '- (none captured)',
   ``,
-  `Open findings: see findings.md · machine detail: .harness/{gate.md,probe.json,slop.json,progress.json}`,
+  `Open findings: see findings.md · per-pass history: .harness/findings-history.md · machine detail: .harness/{gate.md,probe.json,slop.json,progress.json}`,
 ].join('\n')
 await runScript(
   `cat > "${reportPath}" <<'HARNESS_REPORT_EOF'\n${reportMd}\nHARNESS_REPORT_EOF\nprintf '{"written":true}\\n'`,
@@ -918,6 +956,7 @@ await runScript(
 return {
   report: reportPath,
   mode,
+  flapping,       // criteria whose pass/fail state changed 2+ times across passes — churned, not fixed; verify by hand
   spec: specPath,
   app: appPath,
   findings: findingsPath,

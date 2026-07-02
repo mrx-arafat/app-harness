@@ -5,7 +5,7 @@
 A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X" into a supervised, self-correcting loop: **Plan → Generate → Gate → Evaluate**. No sprint decomposition, no context rot, no self-graded homework — every agent runs in isolation and coordinates only through files on disk.
 
 [![Repo](https://img.shields.io/badge/github-mrx--arafat%2Fapp--harness-181717?logo=github)](https://github.com/mrx-arafat/app-harness)
-[![Tests](https://img.shields.io/badge/tests-308%2F308_passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-313%2F313_passing-brightgreen)](#testing)
 [![Adapters](https://img.shields.io/badge/adapters-7_shipped-blue)](#adapters)
 
 ---
@@ -119,8 +119,8 @@ bash scripts/test/run-tests.sh
 You should see a TAP-style report ending in something like:
 
 ```
-1..308
-# 308 tests, 308 passed, 0 failed
+1..313
+# 313 tests, 313 passed, 0 failed
 ```
 
 This is a hermetic self-test — no network calls, no real package installs, no live browser required for the default fast suite. If it's green, every adapter's `detect.sh` / `gate.sh` / `run.sh` / `verify.sh` / `quality.mjs` is working correctly against its own fixtures, and the dispatcher's adapter-resolution logic is verified.
@@ -176,6 +176,9 @@ The Workflow runs in the background; you'll get a completion notification. It re
   findings,       // path to findings.md
   report,         // path to REPORT.md — final run summary (adapter, flags, pivots, score
                   // curve, final scores, locked criteria, tokens spent, verdict, artifacts)
+  flapping,       // criteria whose pass/fail state changed 2+ times across passes, e.g.
+                  // "AC3 (F->P->F)" — churned by the fix loop, not fixed; verify by hand.
+                  // Full per-pass trail: .harness/findings-history.md (append-only)
   clean,          // true = every criterion passed, no regressions, all rubric slots >= 2
   gatePassed,     // true = final gate had no failing checks
   needsHuman,     // true = stopped due to budget/stall — a human should take over

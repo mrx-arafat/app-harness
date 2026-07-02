@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-07-03 — Episodic findings history + flap detection
+
+### Added
+- **`.harness/findings-history.md`**: `findings.md` is overwritten each pass, so the
+  checkpoint now also appends each pass's findings to an append-only episodic log (same
+  haiku call, zero extra cost) — the diagnosis trail for what failed, what a fix claimed,
+  and what re-failed.
+- **Flap detection**: the workflow records each criterion's per-pass pass/fail state and,
+  at report time, deterministically flags any id whose state changed 2+ times (e.g.
+  `AC3 (F->P->F)`) — the fix loop churned it, not fixed it. Reported in `REPORT.md`
+  ("flapping criteria" row), logged mid-run, and returned as `flapping` in the result.
+  Two new workflow-logic scenarios (S11 flap, S12 no-false-flap) cover it; suite now 313.
+
 ## 2026-07-02 — Fourth pass: trust boundaries, seed hook, report, feature mode
 
 ### Added

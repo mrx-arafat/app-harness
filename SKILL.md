@@ -135,6 +135,8 @@ bash <skill-dir>/scripts/status.sh <workdir> --watch 2
 
 `status.sh` renders the current phase, the resolved adapter, gate result, the four rubric slots with a weighted-aggregate **score-curve sparkline**, quality-hit counts by weight, verify results (surfaces/console/blank or output/exit-code, depending on the adapter), open-findings count, a **TOKENS** line (cumulative `tokensSpent` from the budget tracker), and a phase **timeline** — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json,adapter.json}` + `findings.md`. It works mid-run, after a crash, and during resume. The Workflow's own `/workflows` view shows the live phase tree and `log()` lines as a complement.
 
+`findings.md` is overwritten each pass (it's the fix agent's current work order); the run's full episodic trail — every pass's findings, so you can see what failed, what a fix claimed, and what re-failed — accumulates append-only in **`.harness/findings-history.md`**. That history also powers deterministic **flap detection**: any criterion whose pass/fail state changes 2+ times across passes is reported in `REPORT.md` and the `flapping` return field — churn like that means a fix "worked" without holding, so verify those criteria by hand.
+
 ## Model Routing
 
 Each agent role runs on a specific model override — Opus for judgment, Sonnet for execution:
@@ -330,6 +332,9 @@ The script returns:
   report,         // path to REPORT.md — final run summary: adapter, clean/gate/needsHuman
                   // flags, pivots, score curve, final scores, locked criteria, tokens
                   // spent, verdict summary, artifact list
+  flapping,       // string[]: criteria whose pass/fail state changed 2+ times across
+                  // passes (e.g. "AC3 (F->P->F)") — the fix loop churned them, not
+                  // fixed them; verify these by hand before trusting clean=true
   clean,          // boolean: true = all criteria pass, no regressions, all scores >= 2
   gatePassed,     // boolean: true = final gate had no failing checks
   needsHuman,     // boolean: true = stopped due to budget or stall — escalate to a human
