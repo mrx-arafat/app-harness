@@ -340,6 +340,84 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 10. doctor.sh — preflight verb (env checks + interrupted-run detection)
+# ---------------------------------------------------------------------------
+section "10. doctor.sh (preflight)"
+
+DOCTOR="$SCRIPTS_DIR/doctor.sh"
+HARNESS_SH="$SCRIPTS_DIR/harness.sh"
+if [ -f "$DOCTOR" ]; then
+  # 10a. JSON output parses and carries the expected shape (this host has node,
+  #      so ok/checks/resume must all be present; node check must pass).
+  _dr_json="$(bash "$HARNESS_SH" doctor "$TMP_ROOT" 2>/dev/null)"
+  _dr_shape="$(printf '%s' "$_dr_json" | node -e '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+      try{const o=JSON.parse(d);
+        const node=(o.checks||[]).find(c=>c.name==="node");
+        const okShape=typeof o.ok==="boolean"&&Array.isArray(o.checks)&&o.resume&&typeof o.resume.present==="boolean";
+        process.stdout.write(`${okShape}\t${node?node.status:"missing"}\t${o.resume.present}`);
+      }catch(e){process.stdout.write("false\tparse-error\tfalse")}
+    })' 2>/dev/null)"
+  _dr_ok="$(printf '%s' "$_dr_shape" | cut -f1)"
+  _dr_node="$(printf '%s' "$_dr_shape" | cut -f2)"
+  _dr_resume="$(printf '%s' "$_dr_shape" | cut -f3)"
+  if [ "$_dr_ok" = "true" ] && [ "$_dr_node" = "pass" ]; then
+    tap_pass "doctor JSON shape valid, node check passes"
+  else
+    tap_fail "doctor JSON shape valid, node check passes (shape=$_dr_ok node=$_dr_node)"
+  fi
+  if [ "$_dr_resume" = "false" ]; then
+    tap_pass "doctor: no resume reported for a fresh workdir"
+  else
+    tap_fail "doctor: no resume reported for a fresh workdir (got present=$_dr_resume)"
+  fi
+
+  # 10b. interrupted-run detection: a progress.json with clean:false -> resume
+  #      present, not clean, correct pass number, and a previous-run warn check.
+  _dr_wd="$TMP_ROOT/doctor-resume"
+  mkdir -p "$_dr_wd/.harness"
+  printf '{"phase":"evaluate","pass":2,"clean":false}' > "$_dr_wd/.harness/progress.json"
+  _dr_res="$(bash "$HARNESS_SH" doctor "$_dr_wd" 2>/dev/null | node -e '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+      try{const o=JSON.parse(d);
+        const pr=(o.checks||[]).find(c=>c.name==="previous-run");
+        process.stdout.write(`${o.resume.present}\t${o.resume.clean}\t${o.resume.pass}\t${pr?pr.status:"missing"}`);
+      }catch(e){process.stdout.write("err")}
+    })' 2>/dev/null)"
+  if [ "$_dr_res" = "$(printf 'true\tfalse\t2\twarn')" ]; then
+    tap_pass "doctor detects interrupted run (present, not clean, pass 2, warn)"
+  else
+    tap_fail "doctor detects interrupted run (got: $_dr_res)"
+  fi
+
+  # 10c. --brief prints the mascot header and a verdict line; exit code follows ok.
+  _dr_brief="$(bash "$HARNESS_SH" doctor "$_dr_wd" --brief 2>/dev/null)"
+  _dr_brc=$?
+  if printf '%s' "$_dr_brief" | grep -q '^ \[o_o\]/' \
+     && printf '%s' "$_dr_brief" | grep -qE '\[(\^_\^|o_~|x_x)\]'; then
+    tap_pass "doctor --brief renders mascot header + verdict"
+  else
+    tap_fail "doctor --brief renders mascot header + verdict"
+  fi
+  if [ "$_dr_brc" -eq 0 ]; then
+    tap_pass "doctor exit 0 when nothing failed (warnings allowed)"
+  else
+    tap_fail "doctor exit 0 when nothing failed (got $_dr_brc)"
+  fi
+
+  # 10d. --adapter hint tightens requirements: adapter echoed back in JSON.
+  _dr_ad="$(bash "$HARNESS_SH" doctor "$TMP_ROOT" --adapter web 2>/dev/null | node -e '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).adapter)}catch(e){process.stdout.write("err")}})' 2>/dev/null)"
+  if [ "$_dr_ad" = "web" ]; then
+    tap_pass "doctor --adapter hint carried into the JSON"
+  else
+    tap_fail "doctor --adapter hint carried into the JSON (got '$_dr_ad')"
+  fi
+else
+  printf '# doctor.sh not found at %s — skipping\n' "$DOCTOR" >&2
+fi
+
+# ---------------------------------------------------------------------------
 # OPTIONAL E2E section — guarded by HARNESS_TEST_E2E=1
 # ---------------------------------------------------------------------------
 if [ "${HARNESS_TEST_E2E:-0}" = "1" ]; then

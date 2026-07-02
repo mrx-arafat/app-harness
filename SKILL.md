@@ -75,6 +75,29 @@ Decide like this:
 
 Feature-mode setup: the app must sit at `workdir/app/`. For a real project that isn't laid out that way, create a scratch workdir and symlink it — `mkdir -p <workdir> && ln -s /path/to/project <workdir>/app` (every dispatcher verb supports the symlink). Requirements the workflow enforces: the app is a git repo with a **clean tree** (its HEAD becomes `.harness/baseline`, the recovery point).
 
+### Step 1 — preflight (mandatory) + launch card
+
+Before launching, run the deterministic preflight and SHOW its output to the user:
+
+```bash
+bash <skill-dir>/scripts/harness.sh doctor <workdir> --adapter <your-adapter-guess> --brief
+```
+
+It verifies the host in seconds (node ≥ 18, git, curl, jq, playwright-cli for UI adapters, disk space) and detects a previous run in the workdir — an interrupted run means **offer resume** (`{scriptPath, resumeFromRunId}`) instead of relaunching. If it prints `[x_x]  blocked`, fix the failures (or ask the user to) — do NOT launch; a run without its tools burns the Planner and Generator before dying at verify.
+
+When preflight is clear, present the **launch card** — this is the user's one moment to see what was understood before 20-60 minutes of background work — then confirm the Workflow opt-in and launch:
+
+```
+ [o_o]/  app-harness — launching
+   mode      build (fresh app)            <- or: feature (editing <project>)
+   adapter   web (from brief)
+   workdir   ./my-app
+   loop      max 3 passes · pivots 1 · preflight [^_^]
+   watch     bash <skill-dir>/scripts/status.sh <workdir> --watch 2   (or /workflows)
+```
+
+Fill every row from real values (the mode you resolved in Step 0, your adapter guess, actual paths and arg values, the doctor verdict mascot). The `watch` line matters most — it's how the user follows the run without asking you.
+
 Workflow needs explicit opt-in — confirm with the user, then run it with the brief as `args.brief`. As part of Phase 1, the Planner reads the brief's intent and automatically picks the adapter, pinning it to `.harness/adapter.json` — you don't need to tell it what kind of app it is, though naming the kind explicitly in the brief (e.g. "a CLI tool", "a Chrome extension") makes the pin more reliable than auto-detection. In feature mode the Planner pins the adapter to the existing app's platform.
 
 ```
@@ -113,7 +136,8 @@ The harness ships a `scripts/` directory of deterministic tools that do all mach
 
 | Script | Job |
 |--------|-----|
-| `harness.sh` | The dispatcher: `harness.sh <verb> <workdir>` resolves the adapter (pinned or auto-detected) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. |
+| `harness.sh` | The dispatcher: `harness.sh <verb> <workdir>` resolves the adapter (pinned or auto-detected) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. The `doctor` verb (preflight) routes before adapter resolution. |
+| `doctor.sh` | Preflight: verifies node/git/curl/jq/playwright-cli/disk in seconds, detects interrupted runs (offer resume). `--brief` prints the human launch-check card; default is JSON. Run it before EVERY launch. |
 | `extract-criteria.mjs` | Parse spec/holdout → AC/HC ids + surfaces (routes, invocations, endpoints, screens — whatever the adapter calls them) → `criteria.json`. |
 | `status.sh` | Live loop dashboard from on-disk state, adapter-aware (see below). |
 | `lib/detect.sh` | Shared package-manager/framework/language/toolchain + port detection, used by every adapter's own `detect.sh`. |
@@ -403,6 +427,7 @@ Karpathy's other rules show up too: the contract (`spec.md` + `holdout.md`) is n
 
 ## Common Mistakes
 
+- **Skipping the preflight + launch card.** Run `harness.sh doctor <workdir> --adapter <guess> --brief` and show the launch card BEFORE launching — a missing tool discovered at verify time has already burned the Planner and Generator, and an interrupted prior run should be resumed, not relaunched.
 - **Skipping Workflow opt-in.** Don't author/run the script without the user agreeing to multi-agent orchestration.
 - **Inlining the roles yourself.** The point is isolation via files — run the workflow, don't play all four agents in one context.
 - **Trusting "tests pass" as done.** The Gate and Evaluator drive the *live* artifact; a green unit suite is not the completion signal.

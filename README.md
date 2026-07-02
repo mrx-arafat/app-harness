@@ -5,7 +5,7 @@
 A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X" into a supervised, self-correcting loop: **Plan → Generate → Gate → Evaluate**. No sprint decomposition, no context rot, no self-graded homework — every agent runs in isolation and coordinates only through files on disk.
 
 [![Repo](https://img.shields.io/badge/github-mrx--arafat%2Fapp--harness-181717?logo=github)](https://github.com/mrx-arafat/app-harness)
-[![Tests](https://img.shields.io/badge/tests-313%2F313_passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-319%2F319_passing-brightgreen)](#testing)
 [![Adapters](https://img.shields.io/badge/adapters-7_shipped-blue)](#adapters)
 
 ---
@@ -21,6 +21,7 @@ A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X"
 - [The Five Phases](#the-five-phases)
 - [The Rubric](#the-rubric)
 - [Anti-Gaming & Reliability Mechanisms](#anti-gaming--reliability-mechanisms)
+- [Preflight & the Launch Card](#preflight--the-launch-card)
 - [Watching a Live Run](#watching-a-live-run)
 - [Model Routing](#model-routing)
 - [Safety & Sandbox](#safety--sandbox)
@@ -159,8 +160,8 @@ bash scripts/test/run-tests.sh
 You should see a TAP-style report ending in something like:
 
 ```
-1..313
-# 313 tests, 313 passed, 0 failed
+1..319
+# 319 tests, 319 passed, 0 failed
 ```
 
 This is a hermetic self-test — no network calls, no real package installs, no live browser required for the default fast suite. If it's green, every adapter's `detect.sh` / `gate.sh` / `run.sh` / `verify.sh` / `quality.mjs` is working correctly against its own fixtures, and the dispatcher's adapter-resolution logic is verified.
@@ -316,6 +317,26 @@ Machine correctness lives entirely in the Gate. The soft Evaluator judge spends 
 - **Layered brakes** — `maxPasses` (hard cap), `minBudget` (token budget), **stall** (2 consecutive passes with no score improvement), and **no-progress** (identical open findings 2 passes running). The real completion check is always deterministic — never the model declaring itself done.
 - **Checkpoint & resume** — every phase transition and fix pass appends to `.harness/state.md` and `.harness/progress.json`; a run can be watched live or resumed after interruption without replaying completed work.
 
+## Preflight & the Launch Card
+
+Every launch is preceded by a deterministic preflight and a one-glance launch card — the moment where you see exactly what was understood before the background work starts:
+
+```
+$ bash <skill-dir>/scripts/harness.sh doctor ./my-app --adapter web --brief
+ [o_o]/  app-harness preflight · adapter: web
+   ok   node            v24.12.0
+   ok   git             git version 2.52.0
+   ok   curl            present
+   ok   jq              jq-1.7.1-apple
+   ok   playwright-cli  present
+   ok   disk            18GB free
+ [^_^]   all clear — ready to launch
+```
+
+`doctor` verifies the host in seconds — node ≥ 18, git, curl, jq, playwright-cli (required only for UI adapters), free disk — and detects a previous run in the workdir: an interrupted one gets a *resume this instead* warning, so half-finished work is picked up rather than clobbered. `[x_x]  blocked` means a launch would have burned the Planner and Generator before dying at verify — the failure list says exactly what to install. JSON output (the default, no `--brief`) carries the same data for programmatic callers.
+
+The mascot has four moods: `[o_o]/` checking, `[^_^]` all clear, `[o_~]` ready with warnings, `[x_x]` blocked.
+
 ## Watching a Live Run
 
 The loop's entire state lives on disk, so you can watch progress without touching the running context:
@@ -368,6 +389,7 @@ app-harness/
 ├── scripts/
 │   ├── harness.sh                # The dispatcher — resolves the adapter, routes every verb
 │   ├── extract-criteria.mjs      # spec.md/holdout.md -> AC/HC ids + surfaces -> criteria.json
+│   ├── doctor.sh                 # Preflight: env checks + interrupted-run detection (the [o_o]/ launch check)
 │   ├── status.sh                 # Live dashboard for a running/completed loop
 │   ├── lib/
 │   │   ├── detect.sh             # Shared pm/framework/language/toolchain detection

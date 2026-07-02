@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-03 — Preflight doctor + launch card (first-sixty-seconds UX)
+
+### Added
+- **`scripts/doctor.sh` + `harness.sh doctor` verb**: deterministic preflight run before
+  every launch — node ≥ 18, git, curl, jq (required for web), playwright-cli (required for
+  UI adapters via `--adapter` hint), free disk — plus **interrupted-run detection**: a
+  workdir holding a previous run's `progress.json` reports "resume with resumeFromRunId"
+  (interrupted) or "clear app/ first" (completed) instead of letting a fresh launch burn
+  the Planner and Generator before dying at verify. JSON by default, `--brief` renders the
+  human launch check fronted by a tiny ASCII mascot with four moods: `[o_o]/` checking,
+  `[^_^]` all clear, `[o_~]` ready with warnings, `[x_x]` blocked. Routes through the
+  dispatcher before adapter resolution (workdir optional).
+- **Launch card protocol** in SKILL.md: after preflight, the calling agent shows one
+  compact card — mode, adapter guess, workdir, loop caps, preflight verdict, and the
+  `status.sh --watch` command — so the user sees exactly what was understood and how to
+  follow the run before 20-60 minutes of background work begins.
+- **Build-mode guard** now distinguishes "previous harness run here (resume it)" from
+  "directory just has files" in its refusal message.
+- Six new suite assertions for doctor (JSON shape, resume detection, mascot brief output,
+  exit codes, adapter hint) — suite now 319/319.
+
 ## 2026-07-03 — Documentation overhaul
 
 ### Changed

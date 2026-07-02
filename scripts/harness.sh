@@ -8,6 +8,7 @@
 # artifact to <workdir>/.harness/<verb>.json.
 #
 # Usage:
+#   harness.sh doctor   [<workdir>] [--adapter ID] [--brief]   (preflight; workdir optional)
 #   harness.sh detect   <workdir>
 #   harness.sh gate     <workdir> [--out F] [--md F]
 #   harness.sh run      <workdir> start|stop [--port P] [--prod]
@@ -227,6 +228,9 @@ PORT=""
 # --prod: serve the production build instead of the dev server (clean screenshots,
 # no dev overlays). The preview verb also honors HARNESS_PREVIEW_PROD=1.
 PROD=0
+# doctor flags: --adapter <hint> tightens required-tool checks; --brief = human card.
+ADAPTER_HINT=""
+BRIEF=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -245,6 +249,9 @@ while [ $# -gt 0 ]; do
     --port)       PORT="${2:-}"; shift 2 ;;
     --port=*)     PORT="${1#--port=}"; shift ;;
     --prod)       PROD=1; shift ;;
+    --adapter)    ADAPTER_HINT="${2:-}"; shift 2 ;;
+    --adapter=*)  ADAPTER_HINT="${1#--adapter=}"; shift ;;
+    --brief)      BRIEF=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift ;;
     -*)           log "ignoring unknown flag: $1"; shift ;;
@@ -265,6 +272,17 @@ if [ -z "$VERB" ]; then
   usage
   exit 2
 fi
+
+# doctor is the PREFLIGHT verb: workdir-optional (it may not exist yet) and
+# adapter-independent (it takes an --adapter HINT, no resolution). Route it
+# straight through before any workdir/adapter machinery.
+if [ "$VERB" = "doctor" ]; then
+  set -- ${WORKDIR:+"$WORKDIR"}
+  [ -n "$ADAPTER_HINT" ] && set -- "$@" --adapter "$ADAPTER_HINT"
+  [ "$BRIEF" = "1" ] && set -- "$@" --brief
+  exec bash "$SCRIPT_DIR/doctor.sh" "$@"
+fi
+
 if [ -z "$WORKDIR" ]; then
   log "ERROR: <workdir> is required"
   usage
