@@ -46,6 +46,60 @@ survive between calls are (a) the JS variables in the orchestrating script (work
 locked criteria, score history — orchestration state, not agent context) and (b) whatever the
 agents wrote to disk. No agent ever sees another agent's context or transcript.
 
+### 1.1 One Evaluate pass, end to end
+
+This is the loop's hot path — where the tokens go and where every trust mechanism fires:
+
+```mermaid
+sequenceDiagram
+    participant W as Workflow (deterministic JS)
+    participant H as Haiku executor
+    participant S as Shared dev server
+    participant A as Evaluator A (Opus)
+    participant B as Evaluator B (Opus)
+    participant F as Fix agent (Sonnet)
+
+    W->>H: boot#N — reuse healthy server, else run.sh start
+    H->>S: one server instance for the whole pass
+    W->>H: prep#N — quality scan + live probe (skipped when source cksum unchanged)
+    par Pass A — correctness
+        W->>A: judge every AC + HC (browser session ha-*)
+        A->>S: drive the live app
+        A-->>W: verdict + evidence + findings text
+    and Pass B — adversarial quality
+        W->>B: hunt slop, edge inputs (session hb-*)
+        B->>S: probe what static analysis can't see
+        B-->>W: verdict + evidence + findings text
+    end
+    Note over W: retry a dead evaluator once
+    W->>W: merge harsher score per slot<br/>silent locked-id omission = regression<br/>record per-criterion state (flap timeline)
+    W->>H: checkpoint#N — progress.json + findings.md<br/>+ findings-history.md + proof-path existence check
+    W->>W: lock ONLY evidenced passes
+    alt clean and every slot >= 2
+        W->>W: exit loop, go to Preview
+    else primary or secondary = 1
+        W->>W: forced pivot (delete, or reset-to-baseline in feature mode)
+    else findings open
+        W->>F: findings.md — EXPECTED | ACTUAL | REPRO | FIX per item
+        F-->>W: fixes, each proven by re-running its repro
+        W->>H: post-fix gate (install skipped when lockfile signature unchanged)
+        Note over W: gate broke → one targeted repair → re-gate → still broken = needsHuman
+    end
+```
+
+### 1.2 Two modes: build vs feature
+
+Everything above runs in one of two modes, resolved by a deterministic **mode guard** before a
+single Opus token is spent. `mode: "build"` (default) scaffolds a new app under `workdir/app/` —
+the guard refuses if that directory already contains files, so a fresh run can never clobber a
+real project or a prior run's output. `mode: "feature"` targets an **existing** app (placed or
+symlinked at `workdir/app/`): the guard requires a clean git tree and records HEAD to
+`.harness/baseline`; the Planner explores the codebase and writes a *feature spec* (new-behavior
+criteria plus 2-3 criteria pinning existing behavior); the Generator edits in place matching the
+existing stack and conventions; and every destructive recovery path — forced pivot, holdout-leak
+regeneration — becomes `git reset --hard <baseline>` instead of deletion. Best-of-N is disabled
+in feature mode (N throwaway copies of one real codebase make no sense).
+
 ### Why files-on-disk, not shared context (loop engineering)
 
 This is a direct implementation of the "loop engineering" idea (Cherny: *"I don't prompt
@@ -80,19 +134,25 @@ resolved to an absolute path in the workflow's very first step (a haiku shell-ex
 <workdir>/
   spec.md                 # PUBLIC — Planner writes once, Generator + Evaluator + gate/verify read
   app/                     # Generator's build output (git repo), Gate boots it, Evaluator drives it
-  findings.md              # Evaluator writes (overwrite Pass A, append Pass B), Generator reads to fix
-  .harness/                 <-- the metadata boundary. Generator is FORBIDDEN to read this dir.
-    adapter.json            # Planner writes the PIN; harness.sh fills in {toolchain,confidence} if missing
-    holdout.md               # Planner writes once; Evaluator reads; Generator NEVER reads (enforced by prompt only)
-    state.md                 # every agent APPENDS a one-line phase marker; status.sh + resume read it
-    criteria.json            # extract-criteria.mjs writes (from spec.md + holdout.md); Evaluator + workflow read
-    slop.json                 # <adapter>/quality.mjs writes each pass; Evaluator Pass B reads
-    probe.json                 # <adapter>/verify.sh writes each pass; Evaluator Pass A + B read
+                            #   (feature mode: the EXISTING app, edited in place — possibly a symlink)
+  findings.md              # workflow writes each pass (merged from both evaluators' verdicts); Generator reads to fix
+  REPORT.md                # workflow writes at the end — run summary, score curve, flap detection, artifacts
+  .harness/                 <-- the metadata boundary. Generator is FORBIDDEN to read this dir (leak-scan enforced).
+    adapter.json            # Planner writes the PIN (+ optional config.seed); harness.sh fills {toolchain,confidence}
+    holdout.md               # Planner writes once; Evaluator reads; Generator NEVER reads (grep-enforced post-generate)
+    baseline                  # feature mode only: pre-feature git HEAD — the pivot/leak recovery point
+    state.md                  # append-only phase markers; status.sh + resume read it
+    criteria.json             # extract-criteria.mjs writes (from spec.md + holdout.md); Evaluator + workflow read
+    slop.json                  # <adapter>/quality.mjs writes each pass (hits capped at 100 heaviest); Pass B reads
+    probe.json                  # <adapter>/verify.sh writes each pass; Evaluator Pass A + B read
     gate.json / gate.md          # <adapter>/gate.sh writes; workflow reads .passed/.checks; human reads gate.md
-    progress.json                 # workflow writes each eval pass (checkpoint); status.sh reads
-    preview.json                   # harness.sh preview writes at the very end; workflow reads .screenshots
-    server.pid / server.log         # <adapter>/run.sh writes while a server/process is alive
-    shots/                            # screenshots (UI adapters) or captured-output .txt (CLI/service)
+    progress.json                 # workflow checkpoint each pass (incl. tokensSpent); status.sh reads
+    findings-history.md            # append-only: every pass's findings — the flap/diagnosis trail
+    preview.json                    # harness.sh preview writes at the very end; workflow reads .screenshots
+    .prep-sig / .install-sig         # cksum change-detection guards (skip re-scan / skip install)
+    server.pid / server.port / server.log  # <adapter>/run.sh state while the shared server is alive
+    seed.log                          # output of the planner-authored seed command, if any
+    shots/                             # screenshots (UI adapters) or captured-output .txt (CLI/service)
 ```
 
 ### Who writes what, precisely
@@ -108,20 +168,30 @@ resolved to an absolute path in the workflow's very first step (a haiku shell-ex
 | `.harness/criteria.json` | `extract-criteria.mjs` via `harness.sh criteria` | workflow (`surfaces` list feeds `verify`/`preview`), Evaluator (`criteria.json`) | once, before pass 1 (`prep0`) |
 | `.harness/slop.json` | `adapters/<id>/quality.mjs` via `harness.sh quality` | Evaluator Pass B (confirms high-weight hits live) | before every eval pass |
 | `.harness/probe.json` | `adapters/<id>/verify.sh` via `harness.sh verify` | Evaluator Pass A (surface status/errors/blank) + Pass B (screenshots/output inspection) | before every eval pass |
-| `findings.md` | Evaluator Pass A (overwrite), Pass B (append) | Generator (fix prompt reads it) | every eval pass |
+| `findings.md` | workflow (checkpoint heredoc — merged from both evaluators' `findings` verdict fields; evaluators write NOTHING to disk) | Generator (fix prompt reads it), next pass's Evaluator A (re-verifies each claimed fix first) | every eval pass |
+| `.harness/findings-history.md` | workflow (checkpoint appends each pass's findings) | humans / post-mortems; the flap-detection timeline is its in-memory twin | every eval pass, append-only |
 | `.harness/progress.json` | workflow, written via heredoc after merging A+B verdicts | `status.sh` (phase, scores, sparkline, regressions) | after every eval pass |
 | `.harness/preview.json` | `harness.sh preview` (wraps `verify.sh --preview` or derives from a normal verify) | workflow (`screenshots[]` in the final return) | Phase 5, once |
 | `.harness/server.pid`, `server.log` | `adapters/<id>/run.sh start` | `run.sh stop` (kills pid + children), gate/verify cleanup traps | transient, per boot |
 
-### The reward-hacking boundary
+### The reward-hacking boundary — and how it's enforced
 
 `.harness/` is a hard line. Every Generator prompt says explicitly: *"DO NOT read `.harness` or
-`holdout.md` — off-limits; reading them is cheating and is detectable."* This is enforced by
-convention (prompt instruction), not a filesystem permission — the harness's threat model
-(`SKILL.md` §Sandbox) treats the *brief* as hostile, not the Generator agent itself. The
-practical enforcement is that the Evaluator would eventually catch a build that mysteriously
-nails every held-out probe despite the public spec never hinting at them — but nothing stops a
-misbehaving agent from reading the directory. This is a designed trust boundary, not a sandbox.
+`holdout.md` — off-limits; reading them is cheating and is detectable."* "Detectable" is no
+longer just a threat: after every generation (and regeneration), a deterministic **leak scan**
+greps the app source for held-out ids (`HC\d+`) and distinctive holdout phrases (≥20 chars,
+fixed-string). A hit discards the build — delete-and-rebuild in build mode, reset-to-baseline in
+feature mode — and regenerates once; a second hit stops the run with `needsHuman=true`. The
+directory still isn't filesystem-protected (the threat model treats the *brief* as hostile, not
+the agent), but a build derived from the hidden oracle no longer survives to evaluation.
+
+The same trust-boundary thinking applies on the critic side: an Evaluator's PASS only enters the
+no-backslide regression lock when it carries **evidence** (an artifact path — spot-checked for
+existence on disk — or an observed-output snippet). An evaluator that hallucinates a pass
+without exercising the app cannot lock it, and the next pass re-verifies it from scratch. And
+the loop's honesty about itself is checked by **flap detection**: each criterion's per-pass
+pass/fail state is recorded, and any id that transitions two or more times (`F→P→F`) is flagged
+in `REPORT.md` and the `flapping` return field — a fix that "worked" without holding.
 
 ---
 
@@ -319,9 +389,15 @@ while !gate.passed && tries < 2 && budget ok:
     re-gate
 ```
 
-Two attempts, then the workflow proceeds regardless — a persistently broken gate becomes
-`gatePassed: false` in the final return, which the caller is told to surface before claiming the
-app works (see `SKILL.md` "Key fields to surface after completion").
+Two attempts, then the workflow **stops** — a build that can't pass its own gate returns
+immediately with `gatePassed: false` and `needsHuman: true`, and the expensive Evaluator never
+runs on it. The same discipline applies mid-loop: after every fix pass the gate re-runs (a
+**post-fix gate**, with the `web` adapter skipping its install step when the lockfile signature
+is unchanged); a fix that broke the build gets exactly one targeted repair and a re-gate, and a
+second failure stops the loop rather than spending two Opus evaluators on a build that no longer
+compiles. Related resilience: a dead evaluator invocation (`null` verdict) is retried once
+before the pass proceeds, so a transient agent death can't silently downgrade a pass to a single
+judge.
 
 ### Five independent brakes
 
@@ -603,9 +679,12 @@ bash <skill-dir>/scripts/status.sh <workdir> --watch 2     # refresh every 2s
 bash <skill-dir>/scripts/status.sh <workdir> --json        # machine-readable snapshot
 ```
 
-`status.sh` reads **only** on-disk state — `progress.json`, `gate.json`, `slop.json`,
-`probe.json`, `criteria.json`, `adapter.json`, `state.md`, `findings.md` — never touches a live
-agent context. That's why it works mid-run, after a crash, or during resume: the loop's true
+`status.sh` reads **only** on-disk state — `progress.json` (including the cumulative
+`tokensSpent` cost line), `gate.json`, `slop.json`, `probe.json`, `criteria.json`,
+`adapter.json`, `state.md`, `findings.md` — never touches a live agent context. For post-run
+diagnosis, `REPORT.md` is the one-page summary (score curve, flapping criteria, artifacts) and
+`.harness/findings-history.md` is the full per-pass episodic trail: what failed, what a fix
+claimed, what re-failed. That's why it works mid-run, after a crash, or during resume: the loop's true
 state was never anywhere else. It renders:
 
 - **phase** (from `progress.json.phase`, falling back to the last `## [phase]`/`phase=` line in

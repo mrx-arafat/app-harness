@@ -17,6 +17,7 @@ A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X"
 - [Adapters](#adapters)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
+- [Two Modes](#two-modes)
 - [The Five Phases](#the-five-phases)
 - [The Rubric](#the-rubric)
 - [Anti-Gaming & Reliability Mechanisms](#anti-gaming--reliability-mechanisms)
@@ -44,12 +45,51 @@ This is not a toy demo generator. It's a loop-engineering harness: the kind of s
 
 ## How it works
 
+```mermaid
+flowchart LR
+    BRIEF([human brief]) --> P
+
+    subgraph AGENTS["LLM agents — never share a context window"]
+        P["Planner<br/>(Opus, runs once)"]
+        G["Generator<br/>(Sonnet)"]
+        EA["Evaluator A — correctness<br/>(Opus)"]
+        EB["Evaluator B — adversarial<br/>(Opus)"]
+        FX["Fix agent<br/>(Sonnet)"]
+        EX["Shell executors<br/>(Haiku, relay JSON only)"]
+    end
+
+    subgraph DISK["Contracts on disk — the only communication channel"]
+        SPEC["spec.md<br/>(public contract)"]
+        HOLD[".harness/holdout.md<br/>(hidden probes)"]
+        FIND["findings.md<br/>(fix work order)"]
+        ART[".harness/ artifacts<br/>gate · probe · slop · criteria<br/>progress · findings-history"]
+    end
+
+    subgraph DET["Deterministic machinery — zero LLM tokens"]
+        DISP["harness.sh dispatcher"]
+        ADP["adapters/&lt;id&gt;/<br/>gate.sh · run.sh · verify.sh · quality.mjs"]
+    end
+
+    P --> SPEC
+    P --> HOLD
+    SPEC --> G
+    G --> APP[("app/ + git")]
+    EX --> DISP
+    DISP --> ADP
+    APP --> ADP
+    ADP --> ART
+    ART --> EA
+    ART --> EB
+    HOLD --> EA
+    APP --> EA
+    APP --> EB
+    EA --> FIND
+    EB --> FIND
+    FIND --> FX
+    FX --> APP
 ```
-Human ──prompt──> Planner ──spec.md + holdout.md──> Generator ──live artifact──> Gate ──> Evaluator
-                  runs once, pins adapter             build (best-of-N)          deterministic   verify + rubric
-                  ~5 min                               app/ + git                gate checks     findings.md, loop until clean
-                                                                                   (per adapter)
-```
+
+The Generator never sees the hidden probes. The Evaluators never talk to the Generator. The coordinator between all of them is **deterministic JavaScript** — brakes, locks, and merges cannot hallucinate.
 
 | Agent | Reads | Writes | Runs |
 |---|---|---|---|
@@ -192,7 +232,54 @@ The Workflow runs in the background; you'll get a completion notification. It re
 
 Immediately after, Claude Code shows you the working artifact — screenshots for UI apps, captured invocation output for CLI/service builds — read straight from what the workflow already produced, no redundant re-boot.
 
+## Two Modes
+
+| | `mode: "build"` (default) | `mode: "feature"` |
+|---|---|---|
+| **What it does** | Scaffolds a brand-new app under `workdir/app/` from the brief | Adds a feature to an **existing** app at `workdir/app/` (directly or via symlink into a real project) |
+| **Guard before any tokens are spent** | Refuses if `app/` already contains files (protects real projects and prior outputs) | Requires a **clean git tree**; records HEAD to `.harness/baseline` as the recovery point |
+| **Planner behavior** | Full creative authority — names the product, expands features, designs the surface | Explores the existing codebase first, writes a *feature spec*: new-behavior criteria **plus 2-3 criteria pinning existing behavior that must not break** |
+| **Generator behavior** | Builds from scratch | Edits in place — same stack, same conventions, commits on top of existing history |
+| **Pivot / leak recovery** | Deletes `app/`, rebuilds from spec | `git reset --hard <baseline>` + clean — never deletes the project |
+| **Best-of-N** | Available (`candidates > 1`) | Disabled |
+
 ## The Five Phases
+
+```mermaid
+flowchart TD
+    MG{"mode guard<br/>build: app/ empty? · feature: clean git tree?"}
+    MG -- fail --> NH1(["needsHuman"])
+    MG -- ok --> PLAN["PLAN — spec.md + holdout.md + adapter pin"]
+    PLAN --> SQ{"spec quality gate<br/>3+ criteria, 1+ surface?"}
+    SQ -- thin --> RP["re-prompt Planner once"]
+    RP --> GEN
+    SQ -- ok --> GEN["GENERATE — build/modify app from spec.md only"]
+    GEN --> LK{"holdout leak scan"}
+    LK -- leak --> RG["discard + regenerate once"]
+    RG --> LK2{"still leaking?"}
+    LK2 -- yes --> NH2(["needsHuman"])
+    LK2 -- no --> GATE
+    LK -- clean --> GATE["GATE — install/typecheck/lint/test/boot<br/>up to 2 targeted repairs"]
+    GATE -- still failing --> NH3(["needsHuman"])
+    GATE -- passes --> SEED["seed demo data (if configured)"]
+    SEED --> BOOT["boot or reuse ONE shared server"]
+    BOOT --> PREP["prep: static quality scan + live probe<br/>(skipped when source unchanged)"]
+    PREP --> EVAL["Pass A and Pass B in PARALLEL<br/>evidence-backed verdicts"]
+    EVAL --> MERGE["merge harsher score per slot<br/>regression cross-check · evidence-gated lock<br/>checkpoint + findings history"]
+    MERGE --> DONE{"clean and every slot 2+?"}
+    DONE -- yes --> PV["PREVIEW — reuse probe.json or fresh capture"]
+    DONE -->|primary or secondary scored 1| PIV["FORCED PIVOT<br/>delete or reset-to-baseline, rebuild, re-gate"]
+    PIV --> BOOT
+    DONE -- findings open --> FIX["FIX — every finding has EXPECTED/ACTUAL/REPRO/FIX;<br/>fix agent must re-run each repro live"]
+    FIX --> PFG{"post-fix machine gate"}
+    PFG -- broke the build --> REP["one targeted repair"]
+    REP --> PFG
+    PFG -- still broken --> NH4(["needsHuman"])
+    PFG -- ok --> BOOT
+    PV --> RPT["REPORT.md — scores, flap detection, artifacts"]
+```
+
+Brakes run throughout the loop: `maxPasses`, token budget, stall (2 flat passes), no-progress (identical findings twice).
 
 1. **Plan** *(Opus, runs once)* — the Planner acts as a senior PM with full creative authority. It names the product, expands implied features, designs the UX or CLI surface, picks the adapter, and writes `spec.md` (the public contract) plus `.harness/holdout.md` — 5-10 adversarial checks the Generator will *never see*. A deterministic spec-quality gate re-prompts the Planner once, with the exact deficiency, if `spec.md` yields fewer than 3 acceptance criteria or no extractable surfaces. For apps that need login, the Planner can also author a `seed` command in `.harness/adapter.json`'s `config` (plus demo credentials in the spec) — the workflow runs it once after the initial gate passes, and again after any forced pivot.
 2. **Generate** *(Sonnet)* — the Generator reads only `spec.md` and builds the complete artifact in one continuous pass, committing at milestones. It is explicitly forbidden from reading `.harness/` — doing so is reward-hacking, and it's now actually enforced: a post-generation scan greps the source for held-out ids and distinctive holdout phrases, discards and regenerates the build once on a hit, and escalates to `needsHuman=true` if the rebuild still leaks.
@@ -225,6 +312,7 @@ Machine correctness lives entirely in the Gate. The soft Evaluator judge spends 
 - **Dead-evaluator retry** — if an evaluator pass returns `null` (agent died), it's retried once before the pass proceeds, instead of silently downgrading to a single judge and skipping the regression cross-check.
 - **Forced pivot** — if `primary` or `secondary` scores a `1`, the harness concludes the build is a generic-slop foundation that can't be patched into something good. It deletes `app/` entirely and restarts from `spec.md` with an explicit instruction to take a genuinely different, more opinionated direction.
 - **Best-of-N generation** — with `candidates > 1`, N independent builds are generated in parallel, each gated independently, and an adversarial Selector judge picks the strongest before the fix loop even begins.
+- **Flap detection** — every criterion's per-pass pass/fail state is recorded; any id whose state changes 2+ times (`F→P→F`) is flagged in `REPORT.md` and the `flapping` return field. A flapping criterion means the fix loop *churned* it rather than fixed it — verify those by hand before trusting `clean=true`. The full per-pass trail lives in append-only `.harness/findings-history.md`.
 - **Layered brakes** — `maxPasses` (hard cap), `minBudget` (token budget), **stall** (2 consecutive passes with no score improvement), and **no-progress** (identical open findings 2 passes running). The real completion check is always deterministic — never the model declaring itself done.
 - **Checkpoint & resume** — every phase transition and fix pass appends to `.harness/state.md` and `.harness/progress.json`; a run can be watched live or resumed after interruption without replaying completed work.
 
@@ -354,6 +442,9 @@ No — Claude Code always confirms the multi-agent `Workflow` opt-in with you be
 
 **What if the loop can't finish?**
 `needsHuman=true` in the return value signals budget exhaustion or a score stall. Surface this to the user and offer to continue with a higher `maxPasses`/`minBudget`, or take over manually — `findings.md` and `.harness/gate.md` are the primary debugging surface.
+
+**Can it modify an existing app instead of building a new one?**
+Yes — `mode: "feature"`. Point `workdir/app/` at the project (a symlink works), make sure the git tree is clean, and describe the feature in the brief. The Planner writes a feature spec against the existing codebase, the Generator edits in place matching its style, and all destructive recovery (pivot, leak regeneration) becomes `git reset --hard` to the recorded pre-feature baseline — the project itself is never deleted. See [Two Modes](#two-modes).
 
 **Can I make it build something not covered by the 7 shipped adapters?**
 Yes — that's exactly what `generic` is for. The Planner authors a `.config` block (build/test/lint/run/verify commands) and the config-driven fallback handles the rest. No code changes needed.

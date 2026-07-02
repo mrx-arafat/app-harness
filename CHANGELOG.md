@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-03 — Documentation overhaul
+
+### Changed
+- **README**: added Mermaid architecture diagrams (system composition — agents / disk contracts
+  / deterministic machinery; full run-lifecycle flowchart with every guard and brake), a "Two
+  Modes" build-vs-feature comparison table, a flap-detection entry in the reliability
+  mechanisms, and a feature-mode FAQ.
+- **docs/ARCHITECTURE.md**: brought fully current with the loop as implemented — new §1.1
+  Evaluate-pass sequence diagram (boot-once, parallel evaluators, evidence gate, post-fix gate),
+  §1.2 two-modes explainer, refreshed on-disk file inventory (findings-history, baseline,
+  REPORT.md, sig guards, seed.log) and writer/reader table, the reward-hacking boundary section
+  rewritten around the enforced leak scan + evidence lock + flap detection, the stale
+  "proceeds regardless on gate failure" claim corrected (the loop now stops), and the operator
+  section updated for TOKENS/REPORT.md/findings-history.
+
 ## 2026-07-03 — Episodic findings history + flap detection
 
 ### Added
