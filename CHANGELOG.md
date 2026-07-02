@@ -1,5 +1,58 @@
 # Changelog
 
+## 2026-07-02 — Fourth pass: trust boundaries, seed hook, report, feature mode
+
+### Added
+- **Feature mode** (`mode: "feature"`): run the harness against an EXISTING app instead of
+  scaffolding a new one. A deterministic mode guard runs before any opus is spent — build
+  mode refuses a non-empty `workdir/app/` (protects real projects and prior outputs);
+  feature mode requires the app to be a clean git repo and records HEAD to
+  `.harness/baseline`. The Planner explores the existing codebase and writes a FEATURE spec
+  (new-behavior criteria plus 2-3 criteria pinning existing behavior); the Generator edits
+  in place matching the existing stack/style; forced pivot and holdout-leak recovery become
+  `git reset --hard <baseline>` + `git clean -fd` instead of delete-and-rescaffold;
+  best-of-N is disabled. SKILL.md gains a "Step 0 — pick the MODE" section instructing the
+  calling agent to ask the user (which app, what feature, what constraints) before
+  launching, and to gather what-to-build details for vague fresh-build briefs.
+- **Spec quality gate** (Plan): after the Planner writes `spec.md`, a deterministic check
+  extracts acceptance criteria and surfaces; fewer than 3 criteria or 0 extracted surfaces
+  re-prompts the Planner once with the exact deficiency before generation starts.
+- **Holdout leak detection** (Generate): a deterministic scan greps the app source for HC
+  ids and distinctive holdout phrases (>=20 chars, fixed-string match) after every build. A
+  hit means the Generator read the forbidden `.harness/holdout.md`: the build is discarded
+  and regenerated once; a second leak stops the run with `needsHuman=true`. Turns "reading
+  `.harness/` is detectable" from a prompt instruction into an enforced check.
+- **Evidence-gated regression lock** (Evaluate): `VERDICT.evidence` is now required —
+  `{id, proof}` per passed criterion. A criterion only enters the no-backslide lock when its
+  PASS carries evidence, and any claimed proof file path is spot-checked for existence on
+  disk (rides along with the existing checkpoint haiku call). Hallucinated passes can't lock.
+- **Seed hook**: the Planner may author `{"seed": "<command>"}` in `.harness/adapter.json`'s
+  `config` block (with demo credentials placed in `spec.md`) for apps that require login.
+  The workflow runs the seed command once from the app dir after the initial gate passes,
+  and again after a forced pivot. Commands containing shell metacharacters are rejected.
+- **`REPORT.md` + `report` return field**: after the Preview phase, the workflow writes
+  `<workdir>/REPORT.md` — adapter, clean/gate/needsHuman flags, pivots, score curve, final
+  scores, locked criteria, tokens spent, verdict summary, artifact list. The return value
+  gains a `report` field pointing at it.
+- **Cost telemetry**: `progress.json` now records `tokensSpent` (`budget.spent()`) at every
+  checkpoint; `status.sh` shows a new TOKENS line in the dashboard.
+- **`scripts/test/workflow-logic.test.mjs`**: exercises the workflow's orchestration logic
+  directly — brakes, the no-backslide regression lock, forced pivot, the evidence gate, and
+  the leak-detection early-exit — against mocked agents, wired into `run-tests.sh`.
+
+### Changed
+- **Dead-evaluator retry**: if Pass A or Pass B returns `null` (agent died), it's retried
+  once before the pass proceeds. Previously a dead evaluator silently downgraded the pass to
+  a single judge and skipped the no-backslide cross-check.
+- **Boot-once extended to `ai-service`**: the shared-server-per-pass pattern (previously
+  `web`-only) now covers HTTP `ai-service` adapters — `verify.sh` reuses a live
+  `server.pid`/`server.port` instance and only stops servers it started. MCP-kind services
+  (no port) are unaffected — `baseUrl` normalizes to empty.
+- **Gate install skip**: the `web` adapter's `gate.sh` skips the install step when
+  `node_modules` exists and the `package.json` + lockfile cksum signature matches the last
+  successful install (signature stored in `.harness/.install-sig`, recorded only on install
+  success). The post-fix re-gate hits this cache on almost every pass.
+
 ## 2026-07-02 — Third pass: content-dir false positives, serialEval, prod-build preview
 
 ### Added

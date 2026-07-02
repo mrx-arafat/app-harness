@@ -70,11 +70,25 @@ add_surface() {
 
 # ============================ HTTP ==========================================
 if [ "$A_KIND" != "mcp" ] && [ "$A_HTTP" -eq 1 ]; then
-  PORT="$(hp_free_port 0)"; [ -z "$PORT" ] && PORT=8788
-  BASEURL="http://127.0.0.1:$PORT"
-  BOOT_LOG="$HARNESS/verify-boot.log"; : > "$BOOT_LOG"
-  PID="$(aisvc_start_http "$APPDIR" "$PORT" "$BOOT_LOG")"
-  if aisvc_boot_wait "$PORT" "$PID" 20; then
+  # Reuse an already-running service (harness boot-once-per-pass): a live
+  # server.pid/server.port answering on its port gets probed as-is and is left
+  # running on exit — we only stop what we start.
+  EXTERNAL_SERVER=0
+  _ep="$(cat "$HARNESS/server.pid" 2>/dev/null)" || _ep=""
+  _epo="$(cat "$HARNESS/server.port" 2>/dev/null)" || _epo=""
+  if [ -n "$_ep" ] && [ -n "$_epo" ] && kill -0 "$_ep" 2>/dev/null && aisvc_port_up "$_epo"; then
+    EXTERNAL_SERVER=1
+    PORT="$_epo"
+    PID=""
+    BASEURL="http://127.0.0.1:$PORT"
+    log "reusing already-running service: base=$BASEURL pid=$_ep (will NOT stop it)"
+  else
+    PORT="$(hp_free_port 0)"; [ -z "$PORT" ] && PORT=8788
+    BASEURL="http://127.0.0.1:$PORT"
+    BOOT_LOG="$HARNESS/verify-boot.log"; : > "$BOOT_LOG"
+    PID="$(aisvc_start_http "$APPDIR" "$PORT" "$BOOT_LOG")"
+  fi
+  if [ "$EXTERNAL_SERVER" -eq 1 ] || aisvc_boot_wait "$PORT" "$PID" 20; then
     [ -z "$SURF_LIST" ] && SURF_LIST="/"
     printf '%s\n' "$SURF_LIST" | while IFS= read -r surf; do
       [ -z "$surf" ] && continue
@@ -103,7 +117,7 @@ if [ "$A_KIND" != "mcp" ] && [ "$A_HTTP" -eq 1 ]; then
       # (subshell via `while read`: record to file directly)
       { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(printf '%s' "$surf" | tr '\t\n' '  ')" "$code" "$blank" "$art" "$(printf '%s' "$err" | tr '\t\n' '  ')" "$obs"; } >> "$RECORDS"
     done
-    aisvc_kill_tree "$PID"; aisvc_free_port "$PORT"
+    if [ "$EXTERNAL_SERVER" -eq 0 ]; then aisvc_kill_tree "$PID"; aisvc_free_port "$PORT"; fi
   else
     aisvc_kill_tree "$PID"; aisvc_free_port "$PORT"
     _r="$(aisvc_first_diag_line "$BOOT_LOG" 200)"

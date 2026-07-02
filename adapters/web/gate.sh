@@ -103,6 +103,17 @@ first_fail_line() {
 
 # --- checks -----------------------------------------------------------------
 install_check() {
+  # Skip the (slow) install when deps can't have changed: node_modules exists AND
+  # the manifest+lockfile signature matches the last successful install. The
+  # post-fix re-gate hits this path on almost every pass — a fix that only touches
+  # source keeps the signature identical.
+  _ic_sigfile="$HARNESS_DIR/.install-sig"
+  _ic_sig="$(cat "$APPDIR/package.json" "$APPDIR/package-lock.json" "$APPDIR/pnpm-lock.yaml" "$APPDIR/yarn.lock" "$APPDIR/bun.lock" "$APPDIR/bun.lockb" 2>/dev/null | cksum | cut -d' ' -f1)"
+  if [ -d "$APPDIR/node_modules" ] && [ -n "$_ic_sig" ] && [ "$_ic_sig" = "$(cat "$_ic_sigfile" 2>/dev/null)" ]; then
+    log "install: skipped (manifest/lockfile unchanged since last successful install)"
+    set_check install pass "skipped: deps unchanged"
+    return
+  fi
   _ic_cmd=$(hp_pm_install "$PM")
   # SECURITY: block npm/pnpm/yarn/bun lifecycle scripts (preinstall/postinstall) by
   # default — the app is generated from an untrusted brief, and a malicious
@@ -116,6 +127,8 @@ install_check() {
   _ic_rc=$?
   if [ "$_ic_rc" -eq 0 ]; then
     set_check install pass ""
+    # Record the manifest signature so the next gate can skip an unchanged install.
+    [ -n "$_ic_sig" ] && printf '%s' "$_ic_sig" > "$_ic_sigfile" 2>/dev/null
   elif [ "$_ic_rc" -eq 124 ]; then
     set_check install fail "install timed out after 300s"
   else

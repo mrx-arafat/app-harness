@@ -84,7 +84,12 @@ jqs() {
 # counting it as a single aggregate pass/fail based on its exit code.
 run_subsuite() {
   _rs_label="$1"; _rs_script="$2"
-  _rs_out=$(bash "$_rs_script" 2>&1)
+  # Node TAP subsuites (*.mjs) run under node; everything else under bash. Both
+  # emit the same ok/not-ok TAP lines that the folding logic below counts.
+  case "$_rs_script" in
+    *.mjs) _rs_out=$(node "$_rs_script" 2>&1) ;;
+    *)     _rs_out=$(bash "$_rs_script" 2>&1) ;;
+  esac
   _rs_exit=$?
 
   _rs_ok=$(printf '%s\n' "$_rs_out" | grep -c '^ok ' 2>/dev/null)
@@ -319,6 +324,19 @@ if [ -d "$ADAPTERS_DIR" ]; then
   done
 else
   printf '# no adapters/ directory found at %s — skipping adapter test.sh discovery\n' "$ADAPTERS_DIR" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 9. workflow-logic.test.mjs — harness.workflow.js orchestration logic
+#    (runs the real workflow body with mocked globals; no agents/shell/FS).
+# ---------------------------------------------------------------------------
+section "9. workflow-logic.test.mjs (harness.workflow.js orchestration logic)"
+
+WORKFLOW_LOGIC_TEST="$TESTS_DIR/workflow-logic.test.mjs"
+if [ -f "$WORKFLOW_LOGIC_TEST" ]; then
+  run_subsuite "workflow-logic.test.mjs" "$WORKFLOW_LOGIC_TEST"
+else
+  printf '# workflow-logic.test.mjs not found at %s — skipping\n' "$WORKFLOW_LOGIC_TEST" >&2
 fi
 
 # ---------------------------------------------------------------------------

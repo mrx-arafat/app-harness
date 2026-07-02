@@ -1,6 +1,6 @@
 ---
 name: app-harness
-description: Use when the user wants to autonomously build any kind of app end-to-end from a brief — a web app, a CLI/TUI tool, a browser extension, a mobile app (React Native/Expo/Flutter/iOS), a desktop app (Electron/Tauri), an AI/API/agent/automation service, or anything else via a generic config-driven fallback — and wants the Plan-Generate-Gate-Evaluate harness where four agents coordinate only through files on disk, with hard machine gates, held-out anti-gaming checks, regression locks, best-of-N generation, forced pivot, and budget/stall termination.
+description: Use when the user wants to autonomously build any kind of app end-to-end from a brief — a web app, a CLI/TUI tool, a browser extension, a mobile app (React Native/Expo/Flutter/iOS), a desktop app (Electron/Tauri), an AI/API/agent/automation service, or anything else via a generic config-driven fallback — OR to add a feature to an existing app (feature mode edits in place against a baseline). Runs the Plan-Generate-Gate-Evaluate harness where four agents coordinate only through files on disk, with hard machine gates, held-out anti-gaming checks with leak detection, evidence-gated regression locks, best-of-N generation, forced pivot, and budget/stall termination.
 ---
 
 # App Harness
@@ -60,7 +60,22 @@ For the full frozen interface — dispatcher verbs, JSON schemas, `adapter.json`
 
 This skill ships a Workflow script: `harness.workflow.js` (same dir as this file).
 
-Workflow needs explicit opt-in — confirm with the user, then run it with the brief as `args.brief`. As part of Phase 1, the Planner reads the brief's intent and automatically picks the adapter, pinning it to `.harness/adapter.json` — you don't need to tell it what kind of app it is, though naming the kind explicitly in the brief (e.g. "a CLI tool", "a Chrome extension") makes the pin more reliable than auto-detection.
+### Step 0 — pick the MODE (ask, don't guess)
+
+The harness runs in one of two modes, and choosing wrong is destructive-adjacent — so resolve it BEFORE launching:
+
+- **`mode: "build"`** (default) — scaffold a brand-new app from the brief under `workdir/app/`. A deterministic guard refuses to start if `workdir/app/` already contains files.
+- **`mode: "feature"`** — add a feature / improvement to an **existing** app. The Planner explores the existing codebase and writes a *feature spec* (new-behavior criteria + 2-3 criteria pinning existing behavior); the Generator edits in place, matching the existing stack and style; pivot / leak recovery becomes `git reset --hard <baseline>` instead of delete-and-rescaffold; best-of-N is disabled.
+
+Decide like this:
+
+1. **User asks to improve/extend/add-to an existing app, or the current directory already contains a project** → use `AskUserQuestion` to confirm feature mode and gather what the brief needs: *which app/directory*, *what feature*, *any constraints* (stack, style, must-not-touch areas). Fold the answers into `args.brief`.
+2. **Fresh build with a vague brief** ("build me something for X") → ask what to build first (target users, core surface, platform) — a richer brief yields a richer spec. A clear brief needs no questions.
+3. **Ambiguous** → ask. Never point `mode: "build"` at a directory containing work, and never run feature mode without the user naming the target app.
+
+Feature-mode setup: the app must sit at `workdir/app/`. For a real project that isn't laid out that way, create a scratch workdir and symlink it — `mkdir -p <workdir> && ln -s /path/to/project <workdir>/app` (every dispatcher verb supports the symlink). Requirements the workflow enforces: the app is a git repo with a **clean tree** (its HEAD becomes `.harness/baseline`, the recovery point).
+
+Workflow needs explicit opt-in — confirm with the user, then run it with the brief as `args.brief`. As part of Phase 1, the Planner reads the brief's intent and automatically picks the adapter, pinning it to `.harness/adapter.json` — you don't need to tell it what kind of app it is, though naming the kind explicitly in the brief (e.g. "a CLI tool", "a Chrome extension") makes the pin more reliable than auto-detection. In feature mode the Planner pins the adapter to the existing app's platform.
 
 ```
 Workflow({
@@ -79,7 +94,8 @@ Workflow({
 ```
 
 `args`:
-- `brief` (required) — full app description, verbatim from the user.
+- `brief` (required) — full app description, verbatim from the user. In feature mode: the feature description plus the answers gathered in Step 0.
+- `mode` — `"build"` (default) or `"feature"` (modify the existing app at `workdir/app`; see Step 0). Feature mode forces `candidates: 1`.
 - `workdir` — where to build (default `.`). Produces `workdir/spec.md`, `workdir/app/`, `workdir/findings.md`, `workdir/.harness/`.
 - `skillDir` — absolute path of this skill dir, so agents can find `scripts/` (the dispatcher + shared deterministic tools) and `adapters/` (the per-platform tools). Defaults to the installed location; override only if relocated.
 - `maxPasses` — evaluate/fix cycles before stopping (default 3).
@@ -117,7 +133,7 @@ The loop's state lives on disk (`.harness/`), so you can watch progress without 
 bash <skill-dir>/scripts/status.sh <workdir> --watch 2
 ```
 
-`status.sh` renders the current phase, the resolved adapter, gate result, the four rubric slots with a weighted-aggregate **score-curve sparkline**, quality-hit counts by weight, verify results (surfaces/console/blank or output/exit-code, depending on the adapter), open-findings count, and a phase **timeline** — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json,adapter.json}` + `findings.md`. It works mid-run, after a crash, and during resume. The Workflow's own `/workflows` view shows the live phase tree and `log()` lines as a complement.
+`status.sh` renders the current phase, the resolved adapter, gate result, the four rubric slots with a weighted-aggregate **score-curve sparkline**, quality-hit counts by weight, verify results (surfaces/console/blank or output/exit-code, depending on the adapter), open-findings count, a **TOKENS** line (cumulative `tokensSpent` from the budget tracker), and a phase **timeline** — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json,adapter.json}` + `findings.md`. It works mid-run, after a crash, and during resume. The Workflow's own `/workflows` view shows the live phase tree and `log()` lines as a complement.
 
 ## Model Routing
 
@@ -146,13 +162,17 @@ The Planner runs once and writes **three artifacts**:
 
 - **`spec.md`** (public) — product summary, tech stack, surfaces (pages/routes, CLI commands, screens, or API endpoints, as applicable to the adapter), data model, interfaces, and acceptance criteria as a markdown checklist with stable ids (AC1, AC2, …). This is what the Generator builds from.
 - **`.harness/holdout.md`** (hidden) — 5–10 adversarial acceptance probes the Generator is **explicitly forbidden to read**. These cover implied behaviors not spelled out in the public spec: refreshing mid-flow keeps state, submitting a form/command twice doesn't duplicate, deep-linking or re-invoking works, an empty/uninitialized state shows something real instead of crashing. Ids are HC1, HC2, … The Generator never sees these; the Evaluator checks them.
-- **`.harness/adapter.json`** (hidden) — `{id, verifyKind, config?}`, the resolved adapter pin. For `generic`, the Planner also authors the `config` block: `{build, test, lint, run, verify, verifyKind, surfaces}`.
+- **`.harness/adapter.json`** (hidden) — `{id, verifyKind, config?}`, the resolved adapter pin. For `generic`, the Planner also authors the `config` block: `{build, test, lint, run, verify, verifyKind, surfaces}`. For apps that require login, the Planner may also author a `seed` command in `config` — `{"seed": "<command>"}` — with demo credentials placed in `spec.md`; the workflow runs it once from the app dir after the initial gate passes, and again after a forced pivot. Commands containing shell metacharacters are rejected.
 
 The `.harness/` directory is the harness metadata boundary. Nothing the Generator or user touches should go inside it.
+
+**Spec quality gate.** After the Planner writes `spec.md`, a deterministic check extracts its acceptance criteria and surfaces; a spec with fewer than 3 acceptance criteria or fewer than 1 extracted surface is too thin to build from. In that case the Planner is re-prompted once with the exact deficiency (e.g. "only 1 acceptance criterion found, need at least 3") before generation starts.
 
 ### Phase 2 — Generate
 
 The Generator reads **only** `spec.md` and builds the complete app under `app/` in one continuous pass, committing at meaningful milestones. It is forbidden to read `.harness/` — doing so is detectable reward hacking.
+
+**Leak detection gives that prohibition actual teeth.** After generation, a deterministic scan greps the app source for `.harness/holdout.md`'s HC ids and any sufficiently distinctive holdout phrase (≥20 characters, fixed-string match). A hit means the Generator read the forbidden file: the build is discarded and regenerated once; if the regenerated build still leaks, the run stops with `needsHuman=true`.
 
 When `candidates > 1` (best-of-N), the harness builds N independent copies in isolated dirs in parallel, gates each one, a Selector judge picks the best build (preferring gate passes, then completeness and code quality), promotes the winner to `app/`, and deletes the rest.
 
@@ -170,6 +190,8 @@ A deterministic, machine-only Gate runs **before** the expensive Evaluator. It r
 
 The gate is **`adapters/<id>/gate.sh`**, invoked through the dispatcher (`harness.sh gate`) — a real script, not an LLM. A haiku shell-executor agent runs it and relays its JSON; the script detects the toolchain, runs the checks with portable timeouts, actually boots/exercises the artifact and tears it down, and writes `.harness/gate.json` + a readable `.harness/gate.md`. Each check is `pass`, `fail`, or `skip` (skip only when the project genuinely lacks the step). `passed=true` only if no check is `fail`. Check *names* vary by adapter; the schema never does.
 
+**Install skip caching (web).** The `web` adapter's `gate.sh` skips its install step when `node_modules` already exists AND the `package.json` + lockfile cksum signature matches the one recorded at the last successful install (stored in `.harness/.install-sig`, written only on install success). The post-fix re-gate — which reruns after nearly every fix pass — hits this cache on almost every pass, skipping a full dependency reinstall.
+
 **If the gate fails**, a cheap generator fix loop (up to 2 attempts) repairs only what broke — no new features — then re-gates. The fix agent is handed the **failing check name + first error line** (an error written *for the agent*, not raw log spew), so it knows exactly what to fix. Only after the gate passes does the expensive Evaluator run.
 
 **Rationale:** Deterministic machine truth is cheap and unfoolable. The gate is the loop's hard **completion check** — "done" means the adapter's build/test/boot checks pass, proven by a script, not an agent feeling finished. Spending LLM evaluator cycles on a build that doesn't compile or start wastes budget and produces unreliable findings.
@@ -180,7 +202,7 @@ By default Pass A and Pass B run **in parallel** (independent judges, separate b
 
 Before each evaluation, deterministic scripts pre-compute the machine-observable facts and write them to `.harness/`: `extract-criteria.mjs` → `criteria.json` (AC/HC ids + surfaces), `harness.sh quality` → `slop.json` (weighted quality/slop hits), and `harness.sh verify` → `probe.json` (per-surface status: HTTP status/console errors/blank screens for UI adapters, or exit codes/captured output for CLI/service adapters). The Evaluator **reads these artifacts** instead of re-deriving them live — it spends its (Opus) tokens on judgment and targeted interaction, not on crawling routes, re-running commands, or grepping for slop signatures. This keeps the evaluator's context clean and cuts live-interaction calls sharply.
 
-For server-backed adapters (web), the harness boots **one shared server instance per pass** — reused (if still healthy) or started before the pre-compute step. `verify.sh` detects and probes that instance instead of booting its own, and both evaluator passes drive it through separate browser sessions (`harness-a` / `harness-b`). What used to be three boot/teardown cycles per pass (verify + eval-A + eval-B) is now one.
+For server-backed adapters (web, HTTP ai-services), the harness boots **one shared server instance per pass** — reused (if still healthy) or started before the pre-compute step. `verify.sh` detects and probes that instance instead of booting its own, and both evaluator passes drive it through separate browser sessions (`harness-a` / `harness-b`). What used to be three boot/teardown cycles per pass (verify + eval-A + eval-B) is now one. MCP-kind `ai-service` builds (no port to boot) are unaffected by this — `baseUrl` normalizes to empty and each pass talks to the MCP process directly.
 
 The Evaluator runs two passes per loop iteration — **in parallel**, since they are independent judges and neither writes to disk (each returns its findings in the structured verdict; the workflow merges them into `findings.md` in the checkpoint step, eliminating the old file race):
 
@@ -193,6 +215,10 @@ For **UI adapters**, Pass B also runs **`playwright-cli screenshot`** on each ma
 **Resilient evaluation:** When a live-interaction action fails (element not found, button unresponsive, navigation doesn't trigger, a CLI invocation times out, an API call errors transiently), the Evaluator does NOT immediately record FAIL. It retries with a corrective step — reload, wait for element, alternate selector, re-invoke, or re-call. Only if the retry also fails is FAIL recorded. This prevents false negatives from transient timing issues and async renders.
 
 The harness merges the two verdicts by taking the **harsher score per slot**. The loop exits only when `clean=true` AND all four rubric slots are ≥ 2.
+
+**Dead-evaluator retry.** If Pass A or Pass B returns `null` (the agent died mid-run), it is retried once before the pass proceeds. Previously a dead evaluator silently downgraded the pass to a single judge and skipped the no-backslide cross-check entirely.
+
+**Evidence-gated regression lock.** The VERDICT schema now has a required `evidence` array — `{id, proof}` per passed criterion, where `proof` is an artifact path or a short observed snippet. A criterion only enters the no-backslide lock (see below) when its PASS carries evidence, and any claimed proof file path is spot-checked for existence on disk — riding along with the checkpoint write, the same haiku call. A hallucinated PASS cannot lock.
 
 **Evidence-rich findings.** Every failing item lands in `findings.md` in a fixed forensic format — `- [ ] <id> <surface>: EXPECTED <spec behavior> | ACTUAL <observed> | REPRO <minimal steps> | FIX <file hint>` — so the fix agent gets a work order, not a vibe. The fix agent must then **prove each fix live**: re-run the app and walk the finding's own REPRO steps before returning.
 
@@ -259,6 +285,8 @@ The Planner writes adversarial probes to `.harness/holdout.md` that the Generato
 
 Failure of any held-out check (HC id) is blocking, sets `clean=false`, and appears in `holdoutFailures`.
 
+A second, earlier-stage mechanism catches the more direct form of cheating: **actually reading the held-out file.** After generation, a deterministic scan greps the app source for HC ids and distinctive holdout phrases (≥20 characters, fixed-string match); a hit means the Generator read `.harness/holdout.md` directly instead of inferring the implied behavior. The build is discarded and regenerated once; if the regenerated build still leaks, the run stops with `needsHuman=true`. This gives "reading `.harness/` is detectable" (Phase 2) actual enforcement, not just a prompt instruction.
+
 ## Best-of-N Generation
 
 When `candidates > 1`, the harness generates N builds in parallel into isolated directories, gates each one, and runs a Selector judge to pick the winner. The winner is promoted to `app/`; the rest are deleted. This produces a stronger baseline before the evaluate/fix loop begins, at the cost of proportionally more generation tokens.
@@ -299,6 +327,9 @@ The script returns:
   findings,       // path to findings.md
   holdout,        // path to .harness/holdout.md
   state,          // path to .harness/state.md
+  report,         // path to REPORT.md — final run summary: adapter, clean/gate/needsHuman
+                  // flags, pivots, score curve, final scores, locked criteria, tokens
+                  // spent, verdict summary, artifact list
   clean,          // boolean: true = all criteria pass, no regressions, all scores >= 2
   gatePassed,     // boolean: true = final gate had no failing checks
   needsHuman,     // boolean: true = stopped due to budget or stall — escalate to a human
@@ -339,6 +370,7 @@ Key fields to surface after completion:
 - **`scoreHistory`**: the per-pass weighted aggregate (range 6–18). A flat or declining curve means the fix loop is not making progress — inspect `findings.md` and `.harness/gate.md`.
 - **`final.scores`**: the four rubric slots from the last pass. Any slot scoring < 3 is worth noting; any scoring 1 means the loop was supposed to keep running and something terminated it early.
 - **`adapter`**: mention which adapter was resolved, especially if it's `generic` — that means the Planner had to author a custom verify/build config rather than using a purpose-built adapter, which is worth flagging.
+- **`report`**: path to the generated `REPORT.md` with the full run summary — worth pointing the user at it directly instead of re-deriving the same facts from the other fields.
 
 ## Loop Engineering
 

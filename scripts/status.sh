@@ -136,7 +136,7 @@ US=$(printf '\037')
 #     (graceful degradation preserved — no behavior change vs the per-field reads)
 PG_phase=""; PG_pass=""; PG_max=""; PG_clean=""; PG_needs=""; PG_pivots=""
 PG_f=""; PG_pr=""; PG_sc=""; PG_cr=""; PG_agg=""; PG_lk=""
-PG_hist=""; PG_reg=""; PG_hf=""
+PG_hist=""; PG_reg=""; PG_hf=""; PG_tok=""
 read_progress() {
   _pg_row=""
   if [ -f "$HARNESS/progress.json" ] && have_jq; then
@@ -147,11 +147,11 @@ read_progress() {
         (.weightedAggregate|s), (.lockedCount|s),
         ((.scoreHistory // []) | map(tostring) | join(" ")),
         ((.regressions // []) | join(",")),
-        ((.holdoutFailures // []) | join(",")) ] | join("\u001f")
+        ((.holdoutFailures // []) | join(",")), (.tokensSpent|s) ] | join("\u001f")
     ' "$HARNESS/progress.json" 2>/dev/null)
   fi
   IFS="$US" read -r PG_phase PG_pass PG_max PG_clean PG_needs PG_pivots \
-    PG_f PG_pr PG_sc PG_cr PG_agg PG_lk PG_hist PG_reg PG_hf <<EOF
+    PG_f PG_pr PG_sc PG_cr PG_agg PG_lk PG_hist PG_reg PG_hf PG_tok <<EOF
 $_pg_row
 EOF
 }
@@ -249,6 +249,7 @@ render() {
     _hf="$PG_hf"
     [ -n "$_reg" ] && printf '         %sregressions: %s%s\n' "$C_RED" "$_reg" "$C_RST"
     [ -n "$_hf" ] && printf '         %sheld-out fail: %s%s\n' "$C_RED" "$_hf" "$C_RST"
+    [ -n "$PG_tok" ] && printf '  %sTOKENS%s %s spent (per last checkpoint)\n' "$C_B" "$C_RST" "$PG_tok"
   fi
 
   # --- SLOP ---   (total + the three weight tallies in ONE jq call, US-joined)

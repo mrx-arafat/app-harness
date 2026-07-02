@@ -5,7 +5,7 @@
 A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X" into a supervised, self-correcting loop: **Plan → Generate → Gate → Evaluate**. No sprint decomposition, no context rot, no self-graded homework — every agent runs in isolation and coordinates only through files on disk.
 
 [![Repo](https://img.shields.io/badge/github-mrx--arafat%2Fapp--harness-181717?logo=github)](https://github.com/mrx-arafat/app-harness)
-[![Tests](https://img.shields.io/badge/tests-272%2F272_passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-308%2F308_passing-brightgreen)](#testing)
 [![Adapters](https://img.shields.io/badge/adapters-7_shipped-blue)](#adapters)
 
 ---
@@ -119,8 +119,8 @@ bash scripts/test/run-tests.sh
 You should see a TAP-style report ending in something like:
 
 ```
-1..272
-# 272 tests, 272 passed, 0 failed
+1..308
+# 308 tests, 308 passed, 0 failed
 ```
 
 This is a hermetic self-test — no network calls, no real package installs, no live browser required for the default fast suite. If it's green, every adapter's `detect.sh` / `gate.sh` / `run.sh` / `verify.sh` / `quality.mjs` is working correctly against its own fixtures, and the dispatcher's adapter-resolution logic is verified.
@@ -155,7 +155,8 @@ Workflow({
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `brief` | *(required)* | The full app description, verbatim from the user |
+| `brief` | *(required)* | The full app description, verbatim from the user (feature mode: the feature description + target details) |
+| `mode` | `"build"` | `"build"` scaffolds a NEW app (a guard refuses if `workdir/app/` already has files). `"feature"` modifies an EXISTING app at `workdir/app/` (directly or via symlink): feature spec against the existing codebase, in-place edits matching its style, pivot/leak recovery via `git reset --hard` to a recorded clean baseline instead of delete-and-rescaffold. Requires a clean git tree; forces `candidates: 1` |
 | `workdir` | `.` | Build directory — produces `workdir/spec.md`, `workdir/app/`, `workdir/findings.md`, `workdir/.harness/` |
 | `skillDir` | installed location | Absolute path to this skill so agents can find `scripts/` and `adapters/` |
 | `maxPasses` | `3` | Evaluate/fix cycles before stopping |
@@ -173,6 +174,8 @@ The Workflow runs in the background; you'll get a completion notification. It re
   spec,           // path to spec.md
   app,            // path to app/
   findings,       // path to findings.md
+  report,         // path to REPORT.md — final run summary (adapter, flags, pivots, score
+                  // curve, final scores, locked criteria, tokens spent, verdict, artifacts)
   clean,          // true = every criterion passed, no regressions, all rubric slots >= 2
   gatePassed,     // true = final gate had no failing checks
   needsHuman,     // true = stopped due to budget/stall — a human should take over
@@ -188,10 +191,10 @@ Immediately after, Claude Code shows you the working artifact — screenshots fo
 
 ## The Five Phases
 
-1. **Plan** *(Opus, runs once)* — the Planner acts as a senior PM with full creative authority. It names the product, expands implied features, designs the UX or CLI surface, picks the adapter, and writes `spec.md` (the public contract) plus `.harness/holdout.md` — 5-10 adversarial checks the Generator will *never see*.
-2. **Generate** *(Sonnet)* — the Generator reads only `spec.md` and builds the complete artifact in one continuous pass, committing at milestones. It is explicitly forbidden from reading `.harness/` — doing so is reward-hacking and is detectable.
-3. **Gate** *(deterministic script, ~0 LLM tokens)* — a real script (`adapters/<id>/gate.sh`, invoked through the dispatcher) runs install/build/typecheck/lint/test/boot, whichever apply to the platform. `passed=true` only if nothing failed. Up to 2 cheap repair attempts before the loop gives up and flags for a human — expensive Evaluator calls are never spent on a build that doesn't even boot.
-4. **Evaluate** *(Opus, two passes per loop iteration — run in **parallel**)* — Pass A drives every acceptance criterion *and* every held-out check against the live artifact; Pass B hunts adversarially for quality issues (dead buttons, missing empty states, edge-case crashes, AI-slop aesthetics) using a pre-computed static scan. Neither writes files — each returns its findings in its structured verdict and the workflow merges them into `findings.md` (no file race; `serialEval: true` opts back into sequential for stateful backends). For server-backed adapters (web) **one shared server instance powers the whole pass** — the deterministic probe and both evaluators reuse it through separate browser sessions instead of paying three boot/teardown cycles. Every failing item lands in a forensic format — `EXPECTED | ACTUAL | REPRO | FIX` — and the fix agent must re-run each finding's own repro live before returning. After every fix, the **machine gate re-runs** (near-zero LLM cost): a fix that broke the build gets one targeted repair, and if it still fails the loop stops with `needsHuman=true` rather than spending two Opus evaluators on a non-compiling build. The harsher score per dimension wins. The loop repeats until `clean=true` and every rubric slot scores ≥ 2, or a brake fires.
+1. **Plan** *(Opus, runs once)* — the Planner acts as a senior PM with full creative authority. It names the product, expands implied features, designs the UX or CLI surface, picks the adapter, and writes `spec.md` (the public contract) plus `.harness/holdout.md` — 5-10 adversarial checks the Generator will *never see*. A deterministic spec-quality gate re-prompts the Planner once, with the exact deficiency, if `spec.md` yields fewer than 3 acceptance criteria or no extractable surfaces. For apps that need login, the Planner can also author a `seed` command in `.harness/adapter.json`'s `config` (plus demo credentials in the spec) — the workflow runs it once after the initial gate passes, and again after any forced pivot.
+2. **Generate** *(Sonnet)* — the Generator reads only `spec.md` and builds the complete artifact in one continuous pass, committing at milestones. It is explicitly forbidden from reading `.harness/` — doing so is reward-hacking, and it's now actually enforced: a post-generation scan greps the source for held-out ids and distinctive holdout phrases, discards and regenerates the build once on a hit, and escalates to `needsHuman=true` if the rebuild still leaks.
+3. **Gate** *(deterministic script, ~0 LLM tokens)* — a real script (`adapters/<id>/gate.sh`, invoked through the dispatcher) runs install/build/typecheck/lint/test/boot, whichever apply to the platform. `passed=true` only if nothing failed. Up to 2 cheap repair attempts before the loop gives up and flags for a human — expensive Evaluator calls are never spent on a build that doesn't even boot. (The `web` adapter skips its install step entirely when `node_modules` and the lockfile signature already match the last successful install, so the re-gate after a fix pass is fast.)
+4. **Evaluate** *(Opus, two passes per loop iteration — run in **parallel**)* — Pass A drives every acceptance criterion *and* every held-out check against the live artifact; Pass B hunts adversarially for quality issues (dead buttons, missing empty states, edge-case crashes, AI-slop aesthetics) using a pre-computed static scan. Neither writes files — each returns its findings in its structured verdict and the workflow merges them into `findings.md` (no file race; `serialEval: true` opts back into sequential for stateful backends). For server-backed adapters (web, HTTP ai-services) **one shared server instance powers the whole pass** — the deterministic probe and both evaluators reuse it through separate browser sessions instead of paying three boot/teardown cycles. Every failing item lands in a forensic format — `EXPECTED | ACTUAL | REPRO | FIX` — and the fix agent must re-run each finding's own repro live before returning. After every fix, the **machine gate re-runs** (near-zero LLM cost): a fix that broke the build gets one targeted repair, and if it still fails the loop stops with `needsHuman=true` rather than spending two Opus evaluators on a non-compiling build. The harsher score per dimension wins. Every VERDICT now carries an `evidence` array — an artifact path or observed snippet per passed criterion, spot-checked for a real file on disk — so only evidenced passes enter the no-backslide lock; a dead evaluator pass (`null` verdict) is retried once instead of silently downgrading to a single judge. The loop repeats until `clean=true` and every rubric slot scores ≥ 2, or a brake fires.
 5. **Preview** *(deterministic)* — when the source is byte-identical to the last verify scan, the preview is derived straight from the existing `probe.json` — zero re-boot; otherwise every surface is exercised once more and its screenshot or captured output written to disk. Set `HARNESS_PREVIEW_PROD=1` (or pass `--prod` to `harness.sh preview`) to capture against the **production build** — no dev-server hot-reload badge or overlays in the screenshots.
 
 ## The Rubric
@@ -211,8 +214,12 @@ Machine correctness lives entirely in the Gate. The soft Evaluator judge spends 
 
 ## Anti-Gaming & Reliability Mechanisms
 
+- **Spec quality gate** — after the Planner writes `spec.md`, a deterministic check extracts its acceptance criteria and surfaces; fewer than 3 criteria or 0 surfaces re-prompts the Planner once with the exact deficiency before generation starts.
 - **Held-out checks** — the Planner writes adversarial probes the Generator never sees (e.g. *"refreshing mid-flow keeps state," "invalid flag prints a usage error, non-zero exit"*). A build that pattern-matches the visible spec without genuinely implementing the implied behavior gets caught here.
+- **Leak detection** — after generation, a deterministic scan greps the app source for held-out ids and distinctive holdout phrases (≥20 chars, fixed-string match); a hit discards and regenerates the build once, then escalates to `needsHuman=true` if it still leaks. Turns "the Generator can't read `.harness/`" into an enforced check, not just a prompt instruction.
 - **No-backslide regression lock** — every criterion that has *ever* passed is locked. Every later pass must re-verify the full locked set; a locked criterion that now fails is a blocking regression, cross-checked programmatically (not just relying on the evaluator to remember to mention it).
+- **Evidence-gated regression lock** — a criterion only enters the lock when its PASS carries an `evidence` entry (artifact path or observed snippet), and any claimed proof path is spot-checked for existence on disk. Hallucinated passes can't lock.
+- **Dead-evaluator retry** — if an evaluator pass returns `null` (agent died), it's retried once before the pass proceeds, instead of silently downgrading to a single judge and skipping the regression cross-check.
 - **Forced pivot** — if `primary` or `secondary` scores a `1`, the harness concludes the build is a generic-slop foundation that can't be patched into something good. It deletes `app/` entirely and restarts from `spec.md` with an explicit instruction to take a genuinely different, more opinionated direction.
 - **Best-of-N generation** — with `candidates > 1`, N independent builds are generated in parallel, each gated independently, and an adversarial Selector judge picks the strongest before the fix loop even begins.
 - **Layered brakes** — `maxPasses` (hard cap), `minBudget` (token budget), **stall** (2 consecutive passes with no score improvement), and **no-progress** (identical open findings 2 passes running). The real completion check is always deterministic — never the model declaring itself done.
@@ -226,7 +233,7 @@ The loop's entire state lives on disk, so you can watch progress without touchin
 bash <skill-dir>/scripts/status.sh <workdir> --watch 2
 ```
 
-This renders the current phase, gate result, all four rubric scores with a weighted-aggregate sparkline, slop counts by weight, verify results per surface, open-findings count, and a phase timeline — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json}` + `findings.md`. It works mid-run, after a crash, and during resume.
+This renders the current phase, gate result, all four rubric scores with a weighted-aggregate sparkline, slop counts by weight, verify results per surface, open-findings count, a TOKENS line (cumulative `tokensSpent` from the budget tracker), and a phase timeline — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json}` + `findings.md`. It works mid-run, after a crash, and during resume.
 
 ## Model Routing
 
@@ -306,6 +313,8 @@ bash adapters/cli/test/test.sh
 ```
 
 The suite is hermetic by default (no network, no real package installs where avoidable, toolchain-absent steps `skip` rather than `fail`) and prints TAP-style output ending in a clear pass/fail count. Every adapter ships its own tiny GOOD and BROKEN fixtures so `gate.sh` and `quality.mjs` are asserted against known-good and known-bad inputs, not just "did it not crash."
+
+The suite also includes `scripts/test/workflow-logic.test.mjs`, which exercises the orchestration logic in `harness.workflow.js` directly — brakes, the no-backslide regression lock, forced pivot, the evidence gate, and the leak-detection early-exit — against mocked agents, wired into `run-tests.sh`.
 
 ## Extending: Adding a New Adapter
 
