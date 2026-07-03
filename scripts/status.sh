@@ -166,14 +166,15 @@ emit_json() {
   _agg="$PG_agg"; [ -z "$_agg" ] && _agg="null"
   _open=$(open_findings)
   _adapter=$(adapter_id)
+  _age=$(last_write_age)
   if have_jq; then
     jq -n \
       --arg phase "$_phase" --argjson pass "${_pass:-0}" --arg max "$_max" \
       --arg clean "$_clean" --arg gate "$_gate" --arg agg "$_agg" --argjson open "${_open:-0}" \
-      --arg adapter "$_adapter" \
-      '{phase:$phase, pass:$pass, maxPasses:$max, clean:($clean=="true"), gatePassed:($gate=="true"), weightedAggregate:(try ($agg|tonumber) catch null), openFindings:$open, adapter:$adapter}'
+      --arg adapter "$_adapter" --arg age "$_age" \
+      '{phase:$phase, pass:$pass, maxPasses:$max, clean:($clean=="true"), gatePassed:($gate=="true"), weightedAggregate:(try ($agg|tonumber) catch null), openFindings:$open, adapter:$adapter, lastWriteAge:(try ($age|tonumber) catch null)}'
   else
-    printf '{"phase":"%s","pass":%s,"clean":%s,"openFindings":%s,"adapter":"%s"}\n' "$_phase" "${_pass:-0}" "$_clean" "${_open:-0}" "$_adapter"
+    printf '{"phase":"%s","pass":%s,"clean":%s,"openFindings":%s,"adapter":"%s","lastWriteAge":%s}\n' "$_phase" "${_pass:-0}" "$_clean" "${_open:-0}" "$_adapter" "${_age:-null}"
   fi
 }
 
@@ -187,6 +188,19 @@ tail_phase() {
 
 open_findings() {
   if [ -f "$FINDINGS" ]; then grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$FINDINGS" 2>/dev/null || echo 0; else echo 0; fi
+}
+
+# Seconds since the NEWEST file write across .harness + app (vendored/build trees
+# excluded). progress.json alone can lag a whole phase (Plan/Generate write it only
+# at transitions), but ANY working agent constantly touches files — mtime age is a
+# live "working vs stuck" signal that needs no cooperation from the writer. Empty
+# when neither dir has files yet. Trailing slash on app/ follows the feature-mode
+# symlink. perl for epoch mtimes (BSD/GNU stat flags differ; perl is always there).
+last_write_age() {
+  find "$HARNESS" "$WORKDIR/app/" -type f \
+    -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' \
+    -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' \
+    2>/dev/null | perl -ne 'chomp; my @s=stat($_); next unless @s; $b=$s[9] if !$b || $s[9]>$b; END{ print time()-$b if $b }'
 }
 
 render() {
@@ -209,6 +223,15 @@ render() {
   [ "${_pivots:-0}" != "0" ] && printf '   %spivots:%s%s' "$C_MAG" "$_pivots" "$C_RST"
   printf '\n'
   printf '%s\n' "${C_DIM}workdir: $WORKDIR   adapter: ${_adid:-(unknown)}${C_RST}"
+
+  # --- ACTIVITY (working vs stuck, independent of phase granularity) ---
+  _age=$(last_write_age)
+  if [ -n "$_age" ]; then
+    if [ "$_age" -lt 90 ] 2>/dev/null; then _acol=$C_GRN; _alab="active"
+    elif [ "$_age" -lt 600 ] 2>/dev/null; then _acol=$C_YEL; _alab="quiet"
+    else _acol=$C_RED; _alab="stalled?"; fi
+    printf '%s\n' "${C_DIM}activity: ${C_RST}${_acol}last write ${_age}s ago (${_alab})${C_RST}"
+  fi
   echo
 
   # --- GATE ---

@@ -36,7 +36,7 @@ No context resets, no sprint decomposition. The spec file and the gate result ar
 
 ## Adapters
 
-The harness builds to a single **frozen adapter contract** (`docs/ADAPTER-CONTRACT.md`) so the same Plan-Generate-Gate-Evaluate loop works identically whether the artifact is a web app, a CLI tool, or an AI service. A dispatcher script, `scripts/harness.sh <verb> <workdir>`, resolves which adapter owns the build and routes every machine-work verb (`detect | gate | run | verify | quality | criteria | preview | rubric`) to it:
+The harness builds to a single **frozen adapter contract** (`docs/ADAPTER-CONTRACT.md`) so the same Plan-Generate-Gate-Evaluate loop works identically whether the artifact is a web app, a CLI tool, or an AI service. A dispatcher script, `scripts/harness.sh <verb> <workdir>`, resolves which adapter owns the build and routes every machine-work verb (`detect | gate | run | verify | quality | criteria | preview | rubric | reconcile`) to it:
 
 1. **Planner-pinned (primary path):** the Planner reads the brief's intent and writes `.harness/adapter.json` with `{id, verifyKind, config?}` — e.g. "a CLI tool" → `cli`, "a Chrome extension" → `extension`. Intent beats guessing.
 2. **Auto-detect (fallback):** if nothing is pinned, the dispatcher runs every `adapters/*/detect.sh <workdir>` and picks the highest-confidence match; all-low confidence (< 30) falls through to `generic`.
@@ -75,6 +75,8 @@ Decide like this:
 
 Feature-mode setup: the app must sit at `workdir/app/`. For a real project that isn't laid out that way, create a scratch workdir and symlink it — `mkdir -p <workdir> && ln -s /path/to/project <workdir>/app` (every dispatcher verb supports the symlink). Requirements the workflow enforces: the app is a git repo with a **clean tree** (its HEAD becomes `.harness/baseline`, the recovery point).
 
+Feature mode + symlink is the **least-exercised configuration** — flag it on the launch card (see below) and watch the first `status.sh` refreshes rather than trusting silence. Two safety nets specific to this path: a deterministic **scope check** after Generate discards any build that scaffolded a nested app (nested `.git`, or a big new tree with zero existing files modified) instead of editing in place; and `harness.sh reconcile <workdir> [--apply]` recovers a tree where that still happened (older runs, interrupted recovery) by merging the nested scaffold back over the app root and re-gating — dry-run by default, merged files left uncommitted for review.
+
 ### Step 1 — preflight (mandatory) + launch card
 
 Before launching, run the deterministic preflight and SHOW its output to the user:
@@ -94,9 +96,10 @@ When preflight is clear, present the **launch card** — this is the user's one 
    workdir   ./my-app
    loop      max 3 passes · pivots 1 · preflight [^_^]
    watch     bash <skill-dir>/scripts/status.sh <workdir> --watch 2   (or /workflows)
+   note      feature mode + symlink — less-tested combo, check status early   <- only when it applies
 ```
 
-Fill every row from real values (the mode you resolved in Step 0, your adapter guess, actual paths and arg values, the doctor verdict mascot). The `watch` line matters most — it's how the user follows the run without asking you.
+Fill every row from real values (the mode you resolved in Step 0, your adapter guess, actual paths and arg values, the doctor verdict mascot). The `watch` line matters most — it's how the user follows the run without asking you. The `note` row appears ONLY for risk flags worth priming the user on — feature mode against a symlinked project is the canonical one (least-exercised path; suggest checking `status.sh` after the first few minutes instead of trusting silence).
 
 Workflow needs explicit opt-in — confirm with the user, then run it with the brief as `args.brief`. As part of Phase 1, the Planner reads the brief's intent and automatically picks the adapter, pinning it to `.harness/adapter.json` — you don't need to tell it what kind of app it is, though naming the kind explicitly in the brief (e.g. "a CLI tool", "a Chrome extension") makes the pin more reliable than auto-detection. In feature mode the Planner pins the adapter to the existing app's platform.
 
@@ -136,7 +139,7 @@ The harness ships a `scripts/` directory of deterministic tools that do all mach
 
 | Script | Job |
 |--------|-----|
-| `harness.sh` | The dispatcher: `harness.sh <verb> <workdir>` resolves the adapter (pinned or auto-detected) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. The `doctor` verb (preflight) routes before adapter resolution. |
+| `harness.sh` | The dispatcher: `harness.sh <verb> <workdir>` resolves the adapter (pinned or auto-detected) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. The `doctor` verb (preflight) routes before adapter resolution. The `reconcile` verb (feature/symlink recovery) merges a nested scaffolded app back over the app root and re-gates — dry-run by default, `--apply` to execute. |
 | `doctor.sh` | Preflight: verifies node/git/curl/jq/playwright-cli/disk in seconds, detects interrupted runs (offer resume). `--brief` prints the human launch-check card; default is JSON. Run it before EVERY launch. |
 | `extract-criteria.mjs` | Parse spec/holdout → AC/HC ids + surfaces (routes, invocations, endpoints, screens — whatever the adapter calls them) → `criteria.json`. |
 | `status.sh` | Live loop dashboard from on-disk state, adapter-aware (see below). |
@@ -157,7 +160,7 @@ The loop's state lives on disk (`.harness/`), so you can watch progress without 
 bash <skill-dir>/scripts/status.sh <workdir> --watch 2
 ```
 
-`status.sh` renders the current phase, the resolved adapter, gate result, the four rubric slots with a weighted-aggregate **score-curve sparkline**, quality-hit counts by weight, verify results (surfaces/console/blank or output/exit-code, depending on the adapter), open-findings count, a **TOKENS** line (cumulative `tokensSpent` from the budget tracker), and a phase **timeline** — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json,adapter.json}` + `findings.md`. It works mid-run, after a crash, and during resume. The Workflow's own `/workflows` view shows the live phase tree and `log()` lines as a complement.
+`status.sh` renders the current phase (the workflow now stamps phase markers into `progress.json` from the very first guard, so Plan/Generate/Gate no longer render as `(starting)`), an **activity line** — seconds since the newest file write across `.harness/` + `app/`, colored active/quiet/stalled — so "working" vs "stuck" is visible even between phase transitions, the resolved adapter, gate result, the four rubric slots with a weighted-aggregate **score-curve sparkline**, quality-hit counts by weight, verify results (surfaces/console/blank or output/exit-code, depending on the adapter), open-findings count, a **TOKENS** line (cumulative `tokensSpent` from the budget tracker), and a phase **timeline** — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json,adapter.json}` + `findings.md`. It works mid-run, after a crash, and during resume. The Workflow's own `/workflows` view shows the live phase tree and `log()` lines as a complement.
 
 `findings.md` is overwritten each pass (it's the fix agent's current work order); the run's full episodic trail — every pass's findings, so you can see what failed, what a fix claimed, and what re-failed — accumulates append-only in **`.harness/findings-history.md`**. That history also powers deterministic **flap detection**: any criterion whose pass/fail state changes 2+ times across passes is reported in `REPORT.md` and the `flapping` return field — churn like that means a fix "worked" without holding, so verify those criteria by hand.
 
@@ -199,6 +202,8 @@ The `.harness/` directory is the harness metadata boundary. Nothing the Generato
 The Generator reads **only** `spec.md` and builds the complete app under `app/` in one continuous pass, committing at meaningful milestones. It is forbidden to read `.harness/` — doing so is detectable reward hacking.
 
 **Leak detection gives that prohibition actual teeth.** After generation, a deterministic scan greps the app source for `.harness/holdout.md`'s HC ids and any sufficiently distinctive holdout phrase (≥20 characters, fixed-string match). A hit means the Generator read the forbidden file: the build is discarded and regenerated once; if the regenerated build still leaks, the run stops with `needsHuman=true`.
+
+**Feature-mode scope check (same enforcement pattern).** In feature mode a second deterministic scan runs after generation: a nested `.git` anywhere below the app root, or ≥10 new files with **zero** pre-existing files modified, means the Generator scaffolded a parallel app instead of editing the target in place. The tree is reset to `.harness/baseline`, the Generator is re-dispatched once with the exact violation spelled out, and a second violation stops the run with `needsHuman=true` — a mis-scoped build never reaches Gate or Evaluate.
 
 When `candidates > 1` (best-of-N), the harness builds N independent copies in isolated dirs in parallel, gates each one, a Selector judge picks the best build (preferring gate passes, then completeness and code quality), promotes the winner to `app/`, and deletes the rest.
 

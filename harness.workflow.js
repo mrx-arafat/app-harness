@@ -180,6 +180,19 @@ const MODEGUARD = {
   },
 }
 
+// Feature-mode scope scan after Generate: did the generator EDIT the existing
+// project, or scaffold a parallel app inside it?
+const SCOPE = {
+  type: 'object', additionalProperties: false,
+  required: ['nestedGit', 'modified', 'added', 'untracked'],
+  properties: {
+    nestedGit: { type: 'integer', description: 'nested .git entries below the app root (>0 = a NEW repo was scaffolded inside the project)' },
+    modified: { type: 'integer', description: 'pre-existing tracked files modified since the baseline commit' },
+    added: { type: 'integer', description: 'new files committed since the baseline commit' },
+    untracked: { type: 'integer', description: 'untracked files left in the tree' },
+  },
+}
+
 // Checkpoint result: evidence proof-paths claimed by the evaluators that do NOT exist.
 const CHECKPT = {
   type: 'object', additionalProperties: false,
@@ -247,8 +260,18 @@ ${SANDBOX}`,
   { label, phase, model: 'haiku', effort: 'low', ...(schema ? { schema } : {}) }
 )
 
+// Early-phase progress markers. status.sh reads .harness/progress.json for its phase
+// line, but the rich checkpoint write only happens per Evaluate pass — which left
+// Plan/Generate/Gate (routinely 30-60 min of real work) rendering "(starting)" with
+// no way to tell working from stuck. These markers ride along INSIDE existing
+// runScript commands (zero extra agent calls): merge-update just the phase field when
+// progress.json already holds checkpoint data (never clobber scores), else write a
+// minimal stub. Also makes doctor.sh's interrupted-run detection fire for runs that
+// die before the first evaluate checkpoint.
+const markPhase = (name) => `if [ -f "${metaDir}/progress.json" ] && command -v jq >/dev/null 2>&1; then jq -c --arg p "${name}" '.phase=$p' "${metaDir}/progress.json" > "${metaDir}/.progress.tmp" 2>/dev/null && mv "${metaDir}/.progress.tmp" "${metaDir}/progress.json"; else mkdir -p "${metaDir}" && printf '{"phase":"${name}"}\\n' > "${metaDir}/progress.json"; fi`
+
 // Deterministic gate through the dispatcher (resolves the pinned adapter, runs its gate.sh).
-const gateScript = (wd) => `bash "${scriptsDir}/harness.sh" gate "${wd}" --out "${metaDir}/gate.json" --md "${gatePath}"`
+const gateScript = (wd) => `${markPhase('gate')}; bash "${scriptsDir}/harness.sh" gate "${wd}" --out "${metaDir}/gate.json" --md "${gatePath}"`
 
 // ---- MODE GUARD (deterministic, before any opus is spent) --------------------
 // build: refuse to scaffold over an existing non-empty app/ (a user project, or a
@@ -256,8 +279,8 @@ const gateScript = (wd) => `bash "${scriptsDir}/harness.sh" gate "${wd}" --out "
 // feature: the app must exist and its git tree must be CLEAN; HEAD is recorded to
 //        .harness/baseline as the recovery point for pivot / leak resets.
 const modeGuardCmd = mode === 'feature'
-  ? `mkdir -p "${metaDir}"; if [ ! -d "${appPath}" ]; then printf '{"ok":false,"reason":"feature mode but no existing app at ${appPath} — symlink or place the project there","baseline":""}\\n'; elif ! git -C "${appPath}" rev-parse HEAD >/dev/null 2>&1; then printf '{"ok":false,"reason":"feature mode requires the app to be a git repo (the pre-feature commit is the recovery baseline)","baseline":""}\\n'; elif [ -n "$(git -C "${appPath}" status --porcelain 2>/dev/null)" ]; then printf '{"ok":false,"reason":"feature mode requires a CLEAN git tree — commit or stash your changes first (pivot recovery resets to baseline)","baseline":""}\\n'; else b=$(git -C "${appPath}" rev-parse HEAD); printf '%s' "$b" > "${metaDir}/baseline"; printf '{"ok":true,"reason":"","baseline":"%s"}\\n' "$b"; fi`
-  : `if [ -d "${appPath}" ] && [ -n "$(ls -A "${appPath}" 2>/dev/null | head -1)" ]; then if [ -f "${metaDir}/progress.json" ]; then printf '{"ok":false,"reason":"${appPath} holds a previous harness run (see ${metaDir}/progress.json) — resume it with {scriptPath, resumeFromRunId}, or clear app/ for a fresh build, or use mode:feature to build on it","baseline":""}\\n'; else printf '{"ok":false,"reason":"${appPath} already contains files — re-run with mode:feature to modify it, resumeFromRunId to resume, or clear it for a fresh build","baseline":""}\\n'; fi; else printf '{"ok":true,"reason":"","baseline":""}\\n'; fi`
+  ? `mkdir -p "${metaDir}"; if [ ! -d "${appPath}" ]; then printf '{"ok":false,"reason":"feature mode but no existing app at ${appPath} — symlink or place the project there","baseline":""}\\n'; elif ! git -C "${appPath}" rev-parse HEAD >/dev/null 2>&1; then printf '{"ok":false,"reason":"feature mode requires the app to be a git repo (the pre-feature commit is the recovery baseline)","baseline":""}\\n'; elif [ -n "$(git -C "${appPath}" status --porcelain 2>/dev/null)" ]; then printf '{"ok":false,"reason":"feature mode requires a CLEAN git tree — commit or stash your changes first (pivot recovery resets to baseline)","baseline":""}\\n'; else b=$(git -C "${appPath}" rev-parse HEAD); printf '%s' "$b" > "${metaDir}/baseline"; printf '{"phase":"plan"}\\n' > "${metaDir}/progress.json"; printf '{"ok":true,"reason":"","baseline":"%s"}\\n' "$b"; fi`
+  : `if [ -d "${appPath}" ] && [ -n "$(ls -A "${appPath}" 2>/dev/null | head -1)" ]; then if [ -f "${metaDir}/progress.json" ]; then printf '{"ok":false,"reason":"${appPath} holds a previous harness run (see ${metaDir}/progress.json) — resume it with {scriptPath, resumeFromRunId}, or clear app/ for a fresh build, or use mode:feature to build on it","baseline":""}\\n'; else printf '{"ok":false,"reason":"${appPath} already contains files — re-run with mode:feature to modify it, resumeFromRunId to resume, or clear it for a fresh build","baseline":""}\\n'; fi; else mkdir -p "${metaDir}"; printf '{"phase":"plan"}\\n' > "${metaDir}/progress.json"; printf '{"ok":true,"reason":"","baseline":""}\\n'; fi`
 const modeGuard = await runScript(modeGuardCmd, 'mode-guard', 'Plan', MODEGUARD)
 if (!modeGuard || !modeGuard.ok) {
   log(`mode guard (${mode}): ${modeGuard ? modeGuard.reason : 'guard died'} — stopping`)
@@ -335,7 +358,7 @@ if (seedCmd && /[;&|`$<>(){}\\]/.test(seedCmd)) {
 // extractable ACs = nothing to evaluate against, no surfaces = nothing probed).
 // Deterministic check, one re-prompt, then proceed with whatever we have.
 const specCheck = await runScript(
-  `bash "${scriptsDir}/harness.sh" criteria "${workdir}" >/dev/null 2>&1; jq -n --argjson c "$(cat "${metaDir}/criteria.json" 2>/dev/null || printf '{}')" '{acs:(($c.acceptance // [])|length), surfaces:(($c.surfaces // [])|length)}'`,
+  `${markPhase('generate')}; bash "${scriptsDir}/harness.sh" criteria "${workdir}" >/dev/null 2>&1; jq -n --argjson c "$(cat "${metaDir}/criteria.json" 2>/dev/null || printf '{}')" '{acs:(($c.acceptance // [])|length), surfaces:(($c.surfaces // [])|length)}'`,
   'spec-check', 'Plan', SPECCHECK
 )
 if (specCheck && (specCheck.acs < 3 || specCheck.surfaces < 1)) {
@@ -353,9 +376,10 @@ Do NOT change ${holdoutPath} or ${adapterPath}. Do not write code. ${SANDBOX} Re
 phase('Generate')
 
 const genPrompt = (dir) => mode === 'feature'
-  ? `You are the GENERATOR in FEATURE MODE. Read ONLY ${specPath} (a feature spec for an EXISTING app). The app already lives at ${dir} — MODIFY IT IN PLACE. Do NOT scaffold a new app, do NOT rewrite or delete unrelated code, do NOT change the stack. Match the existing code style, naming, and conventions exactly. Implement every acceptance criterion of the feature.
+  ? `You are the GENERATOR in FEATURE MODE. Read ONLY ${specPath} (a feature spec for an EXISTING app). ${dir} already IS the target project (it may be a symlink into the real repo) — its existing files are what you edit, IN PLACE. Do NOT rewrite or delete unrelated code, do NOT change the stack. Match the existing code style, naming, and conventions exactly. Implement every acceptance criterion of the feature.
 
 Rules:
+- NEVER scaffold a new app. That means: no new project directory inside ${dir} (no \`mkdir app\`, no create-*/init scaffolder), NO \`git init\` (a repo already exists — commit on top of it), no parallel skeleton duplicating files that already exist. If you catch yourself scaffolding, stop — the file you want almost certainly exists already; find it and edit it. A deterministic scope check runs after you finish: a nested git repo, or a large new file tree with ZERO existing files modified, DISCARDS all your work.
 - DO NOT read ${metaDir} or ${holdoutPath} — off-limits; reading them is cheating and is detectable.
 - Commit on top of the existing git history at meaningful milestones (never rebase/reset/force-push).
 - The app must still build and run after your changes. Existing behavior pinned by the spec's criteria must keep working.
@@ -441,8 +465,10 @@ fi
 printf '{"leaks":%s}\\n' "$leaks"`
 // Feature mode discards harness-made commits by resetting to the recorded clean
 // baseline (deterministic), never by deleting the user's project.
+// clean -ffd (double force): -fd skips untracked directories that contain their own
+// .git — exactly what a scope-violating nested scaffold leaves behind.
 const resetToBaseline = (label, ph) => runScript(
-  `git -C "${appPath}" reset --hard "$(cat "${metaDir}/baseline")" >/dev/null 2>&1 && git -C "${appPath}" clean -fd >/dev/null 2>&1; printf '{"reset":true}\\n'`,
+  `git -C "${appPath}" reset --hard "$(cat "${metaDir}/baseline")" >/dev/null 2>&1 && git -C "${appPath}" clean -ffd >/dev/null 2>&1; printf '{"reset":true}\\n'`,
   label, ph || 'Evaluate'
 )
 
@@ -463,6 +489,42 @@ if (leak && leak.leaks > 0) {
       spec: specPath, app: appPath, findings: findingsPath, holdout: holdoutPath, state: statePath,
       adapter: adapterId, clean: false, gatePassed: false, needsHuman: true, pivotsUsed: 0,
       lockedCriteria: [], scoreHistory: [], final: null, screenshots: [],
+    }
+  }
+}
+
+// ---- FEATURE-MODE SCOPE CHECK (deterministic) --------------------------------
+// The feature promise is "edit the existing app in place". The cheapest way for a
+// generator to satisfy a spec is to scaffold a FRESH app inside the target (a
+// nested repo / parallel tree) — then gate + evaluate exercise the wrong artifact
+// and the user inherits a manual merge. Same enforcement pattern as the leak scan:
+// deterministic scan, reset to baseline, one regeneration with the exact violation
+// spelled out, stop for a human if it happens again. Runs AFTER the leak block so
+// it validates whatever tree actually enters the Gate. Violation = a nested .git
+// anywhere below the app root, OR >=10 new files with ZERO pre-existing files
+// modified (a real feature wires into existing code; a parallel tree doesn't).
+if (mode === 'feature') {
+  const scopeCmd = `base=$(cat "${metaDir}/baseline" 2>/dev/null); ng=$(find "${appPath}/" -mindepth 2 -name .git -not -path '*/node_modules/*' 2>/dev/null | wc -l | tr -d ' '); mod=0; add=0; if [ -n "$base" ]; then mod=$(git -C "${appPath}" diff --name-only --diff-filter=M "$base" HEAD 2>/dev/null | wc -l | tr -d ' '); add=$(git -C "${appPath}" diff --name-only --diff-filter=A "$base" HEAD 2>/dev/null | wc -l | tr -d ' '); fi; unt=$(git -C "${appPath}" status --porcelain -uall 2>/dev/null | grep -c '^??' | tr -d ' '); printf '{"nestedGit":%s,"modified":%s,"added":%s,"untracked":%s}\\n' "$ng" "$mod" "$add" "$unt"`
+  const scopeViolation = (s) => s && (s.nestedGit > 0 || (s.modified === 0 && (s.added + s.untracked) >= 10))
+  const scopeReason = (s) => s.nestedGit > 0
+    ? 'a nested .git — a NEW repo/app was scaffolded inside the project'
+    : `${s.added + s.untracked} new files with ZERO existing files modified — a parallel tree, not an in-place edit`
+  let scope = await runScript(scopeCmd, 'scope-check', 'Generate', SCOPE)
+  if (scopeViolation(scope)) {
+    log(`FEATURE SCOPE VIOLATION: ${scopeReason(scope)} — resetting to baseline and regenerating`)
+    await resetToBaseline('scope-reset', 'Generate')
+    await agent(
+      `${genPrompt(appPath)}\n\nIMPORTANT: your previous attempt was DISCARDED (tree reset to the pre-feature baseline) because it ${scope.nestedGit > 0 ? 'scaffolded a NEW app with its own git repo INSIDE the project' : 'added a parallel new file tree without modifying a single existing file'} instead of editing the existing app. ${appPath} IS the target project — open its existing source files and change THEM.`,
+      { phase: 'Generate', label: 'generator-rescope', model: 'sonnet' }
+    )
+    scope = await runScript(scopeCmd, 'scope-recheck', 'Generate', SCOPE)
+    if (scopeViolation(scope)) {
+      log('stopping: regenerated build still violates feature-mode scope — flagging for a human')
+      return {
+        spec: specPath, app: appPath, findings: findingsPath, holdout: holdoutPath, state: statePath,
+        adapter: adapterId, mode, clean: false, gatePassed: false, needsHuman: true, pivotsUsed: 0,
+        lockedCriteria: [], scoreHistory: [], final: null, screenshots: [],
+      }
     }
   }
 }
@@ -639,7 +701,7 @@ for (let pass = 0; pass < maxPasses; pass++) {
   // hash and forces a fresh re-scan. cksum is POSIX (portable mac/linux, no deps); .prep-sig
   // lives in .harness (generator-forbidden dir, sandbox-safe).
   await runScript(
-    `sig=$(find "${appPath}" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' -exec cksum {} + 2>/dev/null | sort | cksum | cut -d' ' -f1); prev=$(cat "${metaDir}/.prep-sig" 2>/dev/null || printf none); if [ "$sig" = "$prev" ] && [ -f "${metaDir}/slop.json" ] && [ -f "${metaDir}/probe.json" ]; then printf 'prep skipped: no source change since last scan\\n'; else bash "${scriptsDir}/harness.sh" quality "${workdir}" >/dev/null 2>&1; bash "${scriptsDir}/harness.sh" verify "${workdir}" --surfaces "${surfaceArg}" >/dev/null 2>&1; printf '%s' "$sig" > "${metaDir}/.prep-sig"; printf 'prep done\\n'; fi`,
+    `${markPhase('evaluate')}; sig=$(find "${appPath}" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' -exec cksum {} + 2>/dev/null | sort | cksum | cut -d' ' -f1); prev=$(cat "${metaDir}/.prep-sig" 2>/dev/null || printf none); if [ "$sig" = "$prev" ] && [ -f "${metaDir}/slop.json" ] && [ -f "${metaDir}/probe.json" ]; then printf 'prep skipped: no source change since last scan\\n'; else bash "${scriptsDir}/harness.sh" quality "${workdir}" >/dev/null 2>&1; bash "${scriptsDir}/harness.sh" verify "${workdir}" --surfaces "${surfaceArg}" >/dev/null 2>&1; printf '%s' "$sig" > "${metaDir}/.prep-sig"; printf 'prep done\\n'; fi`,
     `prep#${pass + 1}`, 'Evaluate'
   )
 
@@ -892,7 +954,7 @@ Repair ONLY what makes these gate checks fail — do NOT add features, do NOT un
 // and forces a real preview run. Always retires the shared dev server afterwards.
 phase('Preview')
 const previewOut = await runScript(
-  `sig=$(find "${appPath}" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' -exec cksum {} + 2>/dev/null | sort | cksum | cut -d' ' -f1); prev=$(cat "${metaDir}/.prep-sig" 2>/dev/null || printf none); out=""; if [ "$sig" = "$prev" ] && [ -f "${metaDir}/probe.json" ]; then out=$(jq -c --arg wd "${workdir}" '{screenshots:[.surfaces[]? | (.artifact // "") | select(length>0) | if startswith("/") then . else ($wd + "/" + .) end], baseUrl:(.baseUrl // "")}' "${metaDir}/probe.json" 2>/dev/null); [ -n "$out" ] && printf '%s' "$out" > "${metaDir}/preview.json"; fi; if [ -z "$out" ]; then out=$(bash "${scriptsDir}/harness.sh" preview "${workdir}" --surfaces "${surfaces.join(',')}"); fi; bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1 || true; printf '%s\\n' "$out"`,
+  `${markPhase('preview')}; sig=$(find "${appPath}" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*' -exec cksum {} + 2>/dev/null | sort | cksum | cut -d' ' -f1); prev=$(cat "${metaDir}/.prep-sig" 2>/dev/null || printf none); out=""; if [ "$sig" = "$prev" ] && [ -f "${metaDir}/probe.json" ]; then out=$(jq -c --arg wd "${workdir}" '{screenshots:[.surfaces[]? | (.artifact // "") | select(length>0) | if startswith("/") then . else ($wd + "/" + .) end], baseUrl:(.baseUrl // "")}' "${metaDir}/probe.json" 2>/dev/null); [ -n "$out" ] && printf '%s' "$out" > "${metaDir}/preview.json"; fi; if [ -z "$out" ]; then out=$(bash "${scriptsDir}/harness.sh" preview "${workdir}" --surfaces "${surfaces.join(',')}"); fi; bash "${scriptsDir}/harness.sh" run "${workdir}" stop >/dev/null 2>&1 || true; printf '%s\\n' "$out"`,
   'preview', 'Preview'
 )
 let screenshots = []

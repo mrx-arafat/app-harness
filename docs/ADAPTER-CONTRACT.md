@@ -45,6 +45,14 @@ Verbs and what they must do (all resolve the adapter first, see §2):
   emit `{"screenshots":[...],"baseUrl":"..."}`. Exit 0.
 - `rubric <workdir>` → print the resolved adapter's `rubric.md` contents to stdout (the workflow
   injects it into the Evaluator prompt).
+- `reconcile <workdir> [--apply]` → feature/symlink recovery. Detect a NESTED repo scaffolded
+  inside `<workdir>/app` (a `.git` at depth ≥ 2; nested manifests alone don't count — monorepos).
+  Dry-run by default (`{"reconciled":false,"dryRun":true,"nestedRoot":...,"files":N}`); with
+  `--apply`, merge the nested tree over the app root (nested `.git`/`node_modules` dropped),
+  delete the nested tree, re-run `gate`, and emit
+  `{"reconciled":true,"nestedRoot":...,"filesMerged":N,"gate":{...},"note":...}`. Merged files
+  are left uncommitted. Detection is adapter-independent; the re-gate routes per adapter.
+  Exit 0 on dry-run/nothing-to-do/merged+gate-pass; 1 when the merge or re-gate fails.
 
 Flag parsing must tolerate flags in any order. Unknown adapter id → fall back to `generic`.
 

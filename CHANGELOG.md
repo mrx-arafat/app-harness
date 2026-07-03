@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-07-04 — Feature-mode scope gate, live-signal status, reconcile verb (field-run feedback)
+
+Root-caused from a real feature-mode + symlink run where the Generator scaffolded a whole
+new app (own `.git`) inside the symlinked target — gate/evaluate then exercised the wrong
+artifact and recovery was fully manual — while `status.sh` showed `(starting)` for the
+entire 40-minute Plan/Generate/Gate stretch.
+
+### Added
+- **Feature-mode scope check** (the missing anti-gaming gate for feature mode): after
+  Generate, a deterministic scan fails the build when a nested `.git` exists below the app
+  root OR ≥10 new files were added with ZERO pre-existing files modified (a real feature
+  wires into existing code; a parallel tree doesn't). Same enforcement pattern as the
+  holdout leak scan: reset to `.harness/baseline`, regenerate once with the exact violation
+  spelled out, second violation → `needsHuman=true`. A mis-scoped build never reaches Gate.
+  Verified live through a symlinked git fixture. Three new workflow-logic scenarios
+  (S13 rescope-recovers, S14 double-violation stops before gate, S15 build-mode unaffected).
+- **`harness.sh reconcile <workdir> [--apply]`**: scriptable recovery for trees where the
+  nested scaffold already happened (runs predating the scope gate, interrupted recovery) —
+  dry-run plan by default; `--apply` tar-merges the nested tree over the app root (nested
+  `.git`/`node_modules` dropped, target `.git` untouched), deletes the nested tree, and
+  re-runs the machine gate so dead imports surface immediately. Merged files left
+  uncommitted for review. Conservative detection: nested `.git` only (nested manifests
+  false-positive on monorepos). Five new suite assertions.
+- **Early phase markers in `progress.json`**: the workflow now stamps `{"phase":...}` from
+  the very first mode-guard call and updates it at generate/gate/evaluate/preview — riding
+  inside EXISTING runScript commands (zero extra agent calls), merge-updating via jq so
+  evaluate checkpoints are never clobbered. `status.sh` no longer renders `(starting)`
+  through 40 minutes of real Plan/Generate/Gate work, and doctor's interrupted-run
+  detection now fires for runs that die before the first evaluate checkpoint.
+- **`status.sh` activity line**: seconds since the newest file write across `.harness/` +
+  `app/` (vendored trees excluded, symlinked app followed), colored active/quiet/stalled —
+  a live "working vs stuck" signal that needs no cooperation from the writer. Also
+  `lastWriteAge` in `--json`. (The workflow journal lives in the session transcript dir,
+  which `status.sh` can't know from the workdir alone — file mtime is the same signal,
+  observable from disk state only.)
+- **Launch card `note` row** (SKILL.md): feature mode + symlink is flagged as the
+  least-exercised combo with a prompt to check `status.sh` early instead of trusting
+  silence.
+
+### Changed
+- **Feature-mode Generator prompt hardened**: `app/` "already IS the target project (may be
+  a symlink into the real repo)" — explicit NEVER `mkdir app`, NEVER `git init`, NEVER
+  parallel skeletons, plus a warning that the deterministic scope check discards
+  violations. Build-mode boilerplate can no longer be pattern-matched into scaffolding.
+- **`resetToBaseline` uses `git clean -ffd`** (was `-fd`): single-force skips untracked
+  directories that contain their own `.git` — exactly what a scope-violating nested
+  scaffold leaves behind, so leak/pivot/scope resets now actually remove it.
+- Suite: 338 assertions (was 319), all passing; workflow-logic 51/51.
+
 ## 2026-07-03 — Preflight doctor + launch card (first-sixty-seconds UX)
 
 ### Added

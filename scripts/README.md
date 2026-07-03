@@ -26,7 +26,7 @@ built.
 
 | Script | Job | Output |
 |--------|-----|--------|
-| `harness.sh` | **The dispatcher.** `harness.sh <verb> <workdir> [flags]` resolves which adapter owns the workdir (Planner-pinned `.harness/adapter.json`, else auto-detect via each adapter's `detect.sh`) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. | verb-specific JSON (see adapter contract) |
+| `harness.sh` | **The dispatcher.** `harness.sh <verb> <workdir> [flags]` resolves which adapter owns the workdir (Planner-pinned `.harness/adapter.json`, else auto-detect via each adapter's `detect.sh`) and routes `detect\|gate\|run\|verify\|quality\|criteria\|preview\|rubric` to `adapters/<id>/`. Also `reconcile <workdir> [--apply]`: feature/symlink recovery — merges a nested scaffolded app back over the app root, then re-gates (dry-run by default). | verb-specific JSON (see adapter contract) |
 | `lib/detect.sh` | Shared detection: package manager, framework, run script, free port, wait-for-port, plus language/toolchain detection (`hp_detect_language`, `hp_lang_install/build/test`). Sourced by adapter scripts. | functions |
 | `lib/quality-core.mjs` | Shared universal smell scanner (`scanUniversal(root) -> hits[]`): TODO/FIXME, empty catch, debug logs, dummy data, hardcoded secrets. Every adapter's `quality.mjs` extends this with platform-specific kinds. | function |
 | `extract-criteria.mjs` | Parses `spec.md`/`holdout.md` into structured AC/HC ids + surfaces list (routes, CLI invocations, screens, endpoints — adapter-independent). | `.harness/criteria.json` |

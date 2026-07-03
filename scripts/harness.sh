@@ -18,12 +18,15 @@
 #   harness.sh preview  <workdir> --surfaces "a,b,c" [--session S] [--shots D] [--prod]
 #                       (preview also honors HARNESS_PREVIEW_PROD=1)
 #   harness.sh rubric   <workdir>
+#   harness.sh reconcile <workdir> [--apply]   (merge a NESTED scaffolded app back
+#                       into the app root — feature/symlink recovery; dry-run default)
 #
 # Flags may appear in any order. Exit codes per contract:
 #   detect/quality/criteria/preview/rubric -> 0
 #   gate    -> 0 iff passed
 #   verify  -> 0 iff all surfaces reachable and no blank screens (adapter decides)
 #   run     -> passthrough from adapter run.sh
+#   reconcile -> 0 (dry-run / nothing to do / merged + gate passed), 1 (merge or gate failed)
 #
 # Portability: bash 3.2 (macOS default). set -u (NOT -e). No assoc arrays / mapfile /
 # local -n / GNU-only flags. JSON handled via Node 18+ stdlib (no jq dependency).
@@ -231,6 +234,8 @@ PROD=0
 # doctor flags: --adapter <hint> tightens required-tool checks; --brief = human card.
 ADAPTER_HINT=""
 BRIEF=0
+# reconcile flag: --apply performs the merge (default is a dry-run plan).
+APPLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -252,6 +257,7 @@ while [ $# -gt 0 ]; do
     --adapter)    ADAPTER_HINT="${2:-}"; shift 2 ;;
     --adapter=*)  ADAPTER_HINT="${1#--adapter=}"; shift ;;
     --brief)      BRIEF=1; shift ;;
+    --apply)      APPLY=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift ;;
     -*)           log "ignoring unknown flag: $1"; shift ;;
@@ -300,6 +306,7 @@ if [ -z "$WORKDIR_ABS" ]; then
     criteria) printf '%s\n' '{"acceptance":[],"holdout":[],"surfaces":[],"routes":[]}'; exit 0 ;;
     preview)  printf '%s\n' '{"screenshots":[],"baseUrl":""}'; exit 0 ;;
     detect)   printf '%s\n' '{"id":"generic","confidence":0,"toolchain":{}}'; exit 0 ;;
+    reconcile) printf '%s\n' '{"reconciled":false,"nestedRoot":"","reason":"workdir not found"}'; exit 1 ;;
     rubric)   exit 0 ;;
     run)      if [ "$ACTION" = "stop" ]; then exit 0; else printf 'FAIL workdir not found\n'; exit 1; fi ;;
     *)        exit 2 ;;
@@ -483,6 +490,44 @@ case "$VERB" in
     printf '%s' "$RESULT" > "$CANON" 2>/dev/null
     printf '%s\n' "$RESULT"
     exit 0
+    ;;
+
+  reconcile)
+    # Recovery for feature/symlink runs where a generator scaffolded a NESTED app
+    # (its own .git) inside the real project — the failure the feature-mode scope
+    # gate now discards before Gate; this verb repairs trees from runs that predate
+    # the gate or were interrupted mid-recovery. Adapter-independent detection,
+    # adapter-routed re-gate. Conservative on purpose: only a nested .git counts as
+    # a nested app (a nested package.json alone would false-positive on monorepos).
+    #
+    # DRY-RUN by default: prints what would merge. --apply performs it: tar-copies
+    # the nested tree over the app root (nested .git/node_modules dropped, the
+    # target's own .git untouched), deletes the nested tree, then re-runs the
+    # machine gate so dead imports / type breaks from the merge surface right here.
+    # Merged files are left UNCOMMITTED — the human reviews and commits.
+    NESTED_GIT=$(find "$APPDIR/" -mindepth 2 -name .git -not -path '*/node_modules/*' 2>/dev/null | head -1)
+    if [ -z "$NESTED_GIT" ]; then
+      printf '%s\n' '{"reconciled":false,"nestedRoot":"","reason":"no nested repo found under app/ — nothing to reconcile"}'
+      exit 0
+    fi
+    NESTED_ROOT=$(dirname "$NESTED_GIT")
+    NFILES=$(find "$NESTED_ROOT" -type f -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$APPLY" != "1" ]; then
+      node -e 'console.log(JSON.stringify({reconciled:false,dryRun:true,nestedRoot:process.argv[1],files:(parseInt(process.argv[2],10)||0),hint:"re-run with --apply to merge the nested tree over the app root and re-gate"}))' "$NESTED_ROOT" "$NFILES"
+      exit 0
+    fi
+    if ! ( cd "$NESTED_ROOT" && tar -cf - --exclude=.git --exclude=node_modules . ) | ( cd "$APPDIR" && tar -xf - ); then
+      node -e 'console.log(JSON.stringify({reconciled:false,nestedRoot:process.argv[1],reason:"tar merge failed — nested tree left in place"}))' "$NESTED_ROOT"
+      exit 1
+    fi
+    rm -rf "$NESTED_ROOT"
+    GJSON="$(bash "$0" gate "$WORKDIR_ABS" 2>/dev/null)"
+    node -e '
+      let g={}; try{ g=JSON.parse(process.argv[3]); }catch(e){ g={passed:false,summary:"gate output unparseable"}; }
+      console.log(JSON.stringify({reconciled:true,nestedRoot:process.argv[1],filesMerged:(parseInt(process.argv[2],10)||0),gate:g,note:"merged files are UNCOMMITTED — review with git status/diff in the app dir, then commit"}))
+    ' "$NESTED_ROOT" "$NFILES" "$GJSON"
+    PASSED="$(json_field "$GJSON" passed)"
+    if [ "$PASSED" = "true" ]; then exit 0; else exit 1; fi
     ;;
 
   rubric)

@@ -77,6 +77,12 @@ function defaultHandler(label) {
     case 'generator-releak': return 'run cmd'
     case 'leak-check': return { leaks: 0 }
     case 'leak-recheck': return { leaks: 0 }
+    // Feature-mode scope scan (only reached when mode:'feature'): defaults model a
+    // well-scoped in-place edit.
+    case 'scope-check': return { nestedGit: 0, modified: 2, added: 3, untracked: 0 }
+    case 'scope-recheck': return { nestedGit: 0, modified: 2, added: 3, untracked: 0 }
+    case 'scope-reset': return { reset: true }
+    case 'generator-rescope': return 'run cmd'
     case 'prep-criteria': return { surfaces: ['/'] }
     case 'seed': return { seeded: true }
     case 'preview': return '{"screenshots":["/tmp/a.png"],"baseUrl":"http://x"}'
@@ -477,6 +483,61 @@ await scenario('S12', async () => {
     Array.isArray(result.flapping) && result.flapping.length === 0,
     'S12 no-false-flap: single F->P transition is not reported as flapping'
   )
+})
+
+// ===========================================================================
+// S13 — feature-mode scope violation (nested repo scaffolded, rescope succeeds)
+// ===========================================================================
+await scenario('S13', async () => {
+  const { result, calls, logs } = await runWorkflow({
+    args: { mode: 'feature' },
+    handlers: {
+      'mode-guard': { ok: true, reason: '', baseline: 'abc1234' },
+      // First build scaffolded a nested repo inside the project.
+      'scope-check': { nestedGit: 1, modified: 0, added: 0, untracked: 1 },
+      // Rescope edits in place (existing files modified) — passes.
+      'scope-recheck': { nestedGit: 0, modified: 3, added: 4, untracked: 0 },
+    },
+    evalHandler: () => cleanVerdict(),
+  })
+  ok(logHas(logs, 'SCOPE VIOLATION'), 'S13 scope: violation logged')
+  ok(called(calls, 'scope-reset'), 'S13 scope: tree reset to baseline')
+  ok(called(calls, 'generator-rescope'), 'S13 scope: regeneration attempt ran')
+  ok(result.clean === true, 'S13 scope: run proceeds to clean after rescope')
+})
+
+// ===========================================================================
+// S14 — feature-mode scope violation twice (parallel tree heuristic -> stop)
+// ===========================================================================
+await scenario('S14', async () => {
+  const { result, calls } = await runWorkflow({
+    args: { mode: 'feature' },
+    handlers: {
+      'mode-guard': { ok: true, reason: '', baseline: 'abc1234' },
+      // No nested .git, but a big new tree with ZERO existing files modified —
+      // the parallel-tree heuristic — both before and after the rescope.
+      'scope-check': { nestedGit: 0, modified: 0, added: 30, untracked: 5 },
+      'scope-recheck': { nestedGit: 0, modified: 0, added: 25, untracked: 0 },
+    },
+    evalHandler: () => {
+      throw new Error('S14: evaluator ran but the scope check should have stopped the run')
+    },
+  })
+  ok(result.needsHuman === true, 'S14 scope-stop: needsHuman=true')
+  ok(result.clean === false, 'S14 scope-stop: clean=false')
+  ok(!called(calls, 'gate#0'), 'S14 scope-stop: no gate#0 call (mis-scoped build never reaches Gate)')
+  ok(result.mode === 'feature', 'S14 scope-stop: mode=feature in return')
+})
+
+// ===========================================================================
+// S15 — build mode never runs the scope check (feature-only guard)
+// ===========================================================================
+await scenario('S15', async () => {
+  const { result, calls } = await runWorkflow({
+    evalHandler: () => cleanVerdict(),
+  })
+  ok(!called(calls, 'scope-check'), 'S15 build-mode: scope-check not called')
+  ok(result.clean === true, 'S15 build-mode: clean run unaffected')
 })
 
 // ---------------------------------------------------------------------------

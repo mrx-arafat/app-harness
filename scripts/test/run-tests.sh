@@ -283,6 +283,18 @@ bash "$STATUS_SCRIPT" "$STATUS_WD" >/dev/null 2>&1
 _s_exit=$?
 assert_eq "status.sh (human render): exits 0" "0" "$_s_exit"
 
+# Activity signal: lastWriteAge must be a small non-negative number (the fixture
+# files were written moments ago) — the "working vs stuck" line's data source.
+_s_age=$(jqs '.lastWriteAge' "$STATUS_JSON" "")
+case "$_s_age" in
+  ''|null|*[!0-9]*) tap_fail "status.sh --json: lastWriteAge is a number (got '$_s_age')" ;;
+  *) if [ "$_s_age" -lt 300 ]; then
+       tap_pass "status.sh --json: lastWriteAge is a fresh age (${_s_age}s)"
+     else
+       tap_fail "status.sh --json: lastWriteAge is a fresh age (got ${_s_age}s)"
+     fi ;;
+esac
+
 # ---------------------------------------------------------------------------
 # 7. dispatcher.test.sh — scripts/harness.sh adapter resolution smoke test
 # ---------------------------------------------------------------------------
@@ -415,6 +427,68 @@ if [ -f "$DOCTOR" ]; then
   fi
 else
   printf '# doctor.sh not found at %s — skipping\n' "$DOCTOR" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 11. harness.sh reconcile — feature/symlink nested-scaffold recovery
+# ---------------------------------------------------------------------------
+section "11. harness.sh reconcile (nested-scaffold recovery)"
+
+RC_HARNESS="$SCRIPTS_DIR/harness.sh"
+
+# 11a. Clean tree (no nested repo) -> nothing to reconcile, exit 0.
+_rc_wd="$TMP_ROOT/reconcile-clean"
+mkdir -p "$_rc_wd/app/src"
+printf 'export const a = 1\n' > "$_rc_wd/app/src/a.ts"
+_rc_json="$(bash "$RC_HARNESS" reconcile "$_rc_wd" 2>/dev/null)"
+_rc_done=$(jqs '.reconciled' "$_rc_json" "")
+_rc_reason=$(jqs '.reason' "$_rc_json" "")
+assert_eq "reconcile: clean tree -> reconciled=false" "false" "$_rc_done"
+case "$_rc_reason" in
+  *"no nested"*) tap_pass "reconcile: clean tree -> 'no nested repo' reason" ;;
+  *) tap_fail "reconcile: clean tree -> 'no nested repo' reason (got '$_rc_reason')" ;;
+esac
+
+# 11b. Nested scaffold (app/app with its own .git) -> DRY-RUN reports the plan
+#      and touches nothing.
+_rc_wd2="$TMP_ROOT/reconcile-nested"
+mkdir -p "$_rc_wd2/app/src" "$_rc_wd2/app/app/.git" "$_rc_wd2/app/app/src"
+printf 'existing root file\n' > "$_rc_wd2/app/src/keep.ts"
+printf 'nested new file\n' > "$_rc_wd2/app/app/src/feature.ts"
+_rc_json2="$(bash "$RC_HARNESS" reconcile "$_rc_wd2" 2>/dev/null)"
+_rc_dry=$(jqs '.dryRun' "$_rc_json2" "")
+_rc_root=$(jqs '.nestedRoot' "$_rc_json2" "")
+assert_eq "reconcile: nested repo -> dry-run by default" "true" "$_rc_dry"
+case "$_rc_root" in
+  */app/app) tap_pass "reconcile: dry-run names the nested root" ;;
+  *) tap_fail "reconcile: dry-run names the nested root (got '$_rc_root')" ;;
+esac
+if [ -d "$_rc_wd2/app/app/.git" ]; then
+  tap_pass "reconcile: dry-run leaves the nested tree untouched"
+else
+  tap_fail "reconcile: dry-run leaves the nested tree untouched"
+fi
+
+# 11c. --apply merges the nested tree over the app root (nested .git dropped),
+#      removes the nested tree, and re-gates. Adapter pinned to generic with an
+#      empty config so the re-gate stays hermetic/fast; the gate verdict itself
+#      is not asserted — only the merge mechanics.
+mkdir -p "$_rc_wd2/.harness"
+printf '{"id":"generic","verifyKind":"config","config":{}}\n' > "$_rc_wd2/.harness/adapter.json"
+_rc_json3="$(bash "$RC_HARNESS" reconcile "$_rc_wd2" --apply 2>/dev/null)"
+_rc_done3=$(jqs '.reconciled' "$_rc_json3" "")
+assert_eq "reconcile --apply: reconciled=true" "true" "$_rc_done3"
+if [ -f "$_rc_wd2/app/src/feature.ts" ] && [ -f "$_rc_wd2/app/src/keep.ts" ]; then
+  tap_pass "reconcile --apply: nested files merged to root, existing files kept"
+else
+  tap_fail "reconcile --apply: nested files merged to root, existing files kept"
+fi
+# The fixture's app ROOT has no .git — if one appears after the merge, the
+# nested repo's .git leaked through the tar exclude.
+if [ ! -d "$_rc_wd2/app/app" ] && [ ! -e "$_rc_wd2/app/.git" ]; then
+  tap_pass "reconcile --apply: nested tree removed, nested .git NOT imported"
+else
+  tap_fail "reconcile --apply: nested tree removed, nested .git NOT imported"
 fi
 
 # ---------------------------------------------------------------------------

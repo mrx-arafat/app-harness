@@ -5,7 +5,7 @@
 A [Claude Code](https://claude.com/claude-code) skill that turns "build me an X" into a supervised, self-correcting loop: **Plan → Generate → Gate → Evaluate**. No sprint decomposition, no context rot, no self-graded homework — every agent runs in isolation and coordinates only through files on disk.
 
 [![Repo](https://img.shields.io/badge/github-mrx--arafat%2Fapp--harness-181717?logo=github)](https://github.com/mrx-arafat/app-harness)
-[![Tests](https://img.shields.io/badge/tests-319%2F319_passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-338%2F338_passing-brightgreen)](#testing)
 [![Adapters](https://img.shields.io/badge/adapters-7_shipped-blue)](#adapters)
 
 ---
@@ -160,8 +160,8 @@ bash scripts/test/run-tests.sh
 You should see a TAP-style report ending in something like:
 
 ```
-1..319
-# 319 tests, 319 passed, 0 failed
+1..338
+# 338 tests, 338 passed, 0 failed
 ```
 
 This is a hermetic self-test — no network calls, no real package installs, no live browser required for the default fast suite. If it's green, every adapter's `detect.sh` / `gate.sh` / `run.sh` / `verify.sh` / `quality.mjs` is working correctly against its own fixtures, and the dispatcher's adapter-resolution logic is verified.
@@ -242,6 +242,7 @@ Immediately after, Claude Code shows you the working artifact — screenshots fo
 | **Planner behavior** | Full creative authority — names the product, expands features, designs the surface | Explores the existing codebase first, writes a *feature spec*: new-behavior criteria **plus 2-3 criteria pinning existing behavior that must not break** |
 | **Generator behavior** | Builds from scratch | Edits in place — same stack, same conventions, commits on top of existing history |
 | **Pivot / leak recovery** | Deletes `app/`, rebuilds from spec | `git reset --hard <baseline>` + clean — never deletes the project |
+| **Scope enforcement** | n/a (there is nothing pre-existing to protect) | **Deterministic scope check** after Generate: a nested `.git`, or ≥10 new files with zero existing files modified, means a parallel app was scaffolded instead of an in-place edit — reset to baseline, one regeneration, then `needsHuman=true` |
 | **Best-of-N** | Available (`candidates > 1`) | Disabled |
 
 ## The Five Phases
@@ -308,6 +309,7 @@ Machine correctness lives entirely in the Gate. The soft Evaluator judge spends 
 - **Spec quality gate** — after the Planner writes `spec.md`, a deterministic check extracts its acceptance criteria and surfaces; fewer than 3 criteria or 0 surfaces re-prompts the Planner once with the exact deficiency before generation starts.
 - **Held-out checks** — the Planner writes adversarial probes the Generator never sees (e.g. *"refreshing mid-flow keeps state," "invalid flag prints a usage error, non-zero exit"*). A build that pattern-matches the visible spec without genuinely implementing the implied behavior gets caught here.
 - **Leak detection** — after generation, a deterministic scan greps the app source for held-out ids and distinctive holdout phrases (≥20 chars, fixed-string match); a hit discards and regenerates the build once, then escalates to `needsHuman=true` if it still leaks. Turns "the Generator can't read `.harness/`" into an enforced check, not just a prompt instruction.
+- **Feature-mode scope check** — the equivalent enforcement for feature mode's core promise ("edit the existing app in place"). After Generate, a deterministic scan fails the build when a nested `.git` exists below the app root or ≥10 new files were added with **zero** pre-existing files modified — a real feature wires into existing code; a parallel scaffold doesn't. Reset to `.harness/baseline`, one regeneration with the exact violation spelled out, second violation → `needsHuman=true`. A mis-scoped build never reaches Gate or Evaluate. For trees where the scaffold already happened (older runs), `harness.sh reconcile <workdir> [--apply]` merges the nested tree back over the app root and re-gates — dry-run by default, merged files left uncommitted for review.
 - **No-backslide regression lock** — every criterion that has *ever* passed is locked. Every later pass must re-verify the full locked set; a locked criterion that now fails is a blocking regression, cross-checked programmatically (not just relying on the evaluator to remember to mention it).
 - **Evidence-gated regression lock** — a criterion only enters the lock when its PASS carries an `evidence` entry (artifact path or observed snippet), and any claimed proof path is spot-checked for existence on disk. Hallucinated passes can't lock.
 - **Dead-evaluator retry** — if an evaluator pass returns `null` (agent died), it's retried once before the pass proceeds, instead of silently downgrading to a single judge and skipping the regression cross-check.
@@ -345,7 +347,9 @@ The loop's entire state lives on disk, so you can watch progress without touchin
 bash <skill-dir>/scripts/status.sh <workdir> --watch 2
 ```
 
-This renders the current phase, gate result, all four rubric scores with a weighted-aggregate sparkline, slop counts by weight, verify results per surface, open-findings count, a TOKENS line (cumulative `tokensSpent` from the budget tracker), and a phase timeline — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json}` + `findings.md`. It works mid-run, after a crash, and during resume.
+This renders the current phase, an **activity line** (seconds since the newest file write across `.harness/` + `app/`, colored active/quiet/stalled — "working vs stuck" at a glance, even between phase transitions), gate result, all four rubric scores with a weighted-aggregate sparkline, slop counts by weight, verify results per surface, open-findings count, a TOKENS line (cumulative `tokensSpent` from the budget tracker), and a phase timeline — all read from `.harness/{progress.json,gate.json,slop.json,probe.json,criteria.json}` + `findings.md`. It works mid-run, after a crash, and during resume.
+
+The workflow stamps phase markers into `progress.json` from the very first guard call (and at every phase transition after), so the dashboard shows `plan` / `generate` / `gate` from minute one instead of `(starting)` until the first evaluation checkpoint.
 
 ## Model Routing
 
@@ -466,7 +470,10 @@ No — Claude Code always confirms the multi-agent `Workflow` opt-in with you be
 `needsHuman=true` in the return value signals budget exhaustion or a score stall. Surface this to the user and offer to continue with a higher `maxPasses`/`minBudget`, or take over manually — `findings.md` and `.harness/gate.md` are the primary debugging surface.
 
 **Can it modify an existing app instead of building a new one?**
-Yes — `mode: "feature"`. Point `workdir/app/` at the project (a symlink works), make sure the git tree is clean, and describe the feature in the brief. The Planner writes a feature spec against the existing codebase, the Generator edits in place matching its style, and all destructive recovery (pivot, leak regeneration) becomes `git reset --hard` to the recorded pre-feature baseline — the project itself is never deleted. See [Two Modes](#two-modes).
+Yes — `mode: "feature"`. Point `workdir/app/` at the project (a symlink works), make sure the git tree is clean, and describe the feature in the brief. The Planner writes a feature spec against the existing codebase, the Generator edits in place matching its style, and all destructive recovery (pivot, leak regeneration, scope violation) becomes `git reset --hard` to the recorded pre-feature baseline — the project itself is never deleted. A deterministic scope check after generation guarantees the Generator actually edited in place instead of scaffolding a parallel app inside the project. See [Two Modes](#two-modes).
+
+**A past run scaffolded a nested app inside my project — how do I recover?**
+`bash scripts/harness.sh reconcile <workdir>` shows the merge plan (dry-run); add `--apply` to merge the nested tree over the app root (nested `.git` dropped, your repo's `.git` untouched), delete the nested tree, and re-run the machine gate so dead imports and type breaks surface immediately. Merged files are left uncommitted for you to review and commit.
 
 **Can I make it build something not covered by the 7 shipped adapters?**
 Yes — that's exactly what `generic` is for. The Planner authors a `.config` block (build/test/lint/run/verify commands) and the config-driven fallback handles the rest. No code changes needed.
